@@ -44,7 +44,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
 	UNREFERENCED_PARAMETER(RegistrationContext);
 	strcpy(szProcName, GetProcessImageNameByProcessID((ULONG)pid));
 	//比较字符串，返回0，则字符串相同
-	if (!_stricmp(szProcName, "HydraDragonAntivirusLauncher.exe"))
+	if (!_stricmp(szProcName, "HydraDragonAntivirusService.exe"))
 	{
 		//如果创建句柄
 		if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
