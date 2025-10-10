@@ -1,13 +1,17 @@
-// Driver_Process.c  -- updated OB callback with path-based protection
+// Process.c - Process protection with user-mode alerting
 #include <ntifs.h>
+#include <ntstrsafe.h>
 #include "Driver_Process.h"
 
 PVOID obHandle;
 
-// forward
+#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
+
+// Forward declarations
 BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
 BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process);
 BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
+NTSTATUS SendProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
 
 // Entry / register
 NTSTATUS ProcessDriverEntry()
@@ -39,6 +43,116 @@ NTSTATUS ProtectProcess()
     return ObRegisterCallbacks(&obReg, &obHandle);
 }
 
+NTSTATUS SendProcessAlertToUserMode(
+    PEPROCESS TargetProcess,
+    PEPROCESS AttackerProcess,
+    PCWSTR AttackType
+)
+{
+    NTSTATUS status;
+    HANDLE pipeHandle = NULL;
+    IO_STATUS_BLOCK ioStatusBlock;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING pipeName;
+    WCHAR messageBuffer[2048];
+    UNICODE_STRING messageUnicode;
+    PUNICODE_STRING targetPath = NULL;
+    PUNICODE_STRING attackerPath = NULL;
+    HANDLE targetPid = PsGetProcessId(TargetProcess);
+    HANDLE attackerPid = PsGetProcessId(AttackerProcess);
+
+    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &pipeName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    // Open pipe
+    status = ZwCreateFile(
+        &pipeHandle,
+        FILE_WRITE_DATA | SYNCHRONIZE,
+        &objAttr,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+
+    // Get process paths
+    status = SeLocateProcessImageName(TargetProcess, &targetPath);
+    NTSTATUS attackerStatus = SeLocateProcessImageName(AttackerProcess, &attackerPath);
+
+    PCWSTR targetName = (NT_SUCCESS(status) && targetPath) ? targetPath->Buffer : L"Unknown";
+    PCWSTR attackerName = (NT_SUCCESS(attackerStatus) && attackerPath) ? attackerPath->Buffer : L"Unknown";
+
+    // Build JSON message using RtlStringCchPrintfW
+    RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
+    status = RtlStringCchPrintfW(
+        messageBuffer,
+        sizeof(messageBuffer) / sizeof(WCHAR),
+        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"%s\",\"target_pid\":%lld}",
+        targetName,
+        attackerName,
+        (LONGLONG)(ULONG_PTR)attackerPid,
+        AttackType,
+        (LONGLONG)(ULONG_PTR)targetPid
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        ZwClose(pipeHandle);
+        if (targetPath) ExFreePool(targetPath);
+        if (attackerPath) ExFreePool(attackerPath);
+        return status;
+    }
+
+    RtlInitUnicodeString(&messageUnicode, messageBuffer);
+
+    // Write to pipe
+    status = ZwWriteFile(
+        pipeHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatusBlock,
+        messageUnicode.Buffer,
+        messageUnicode.Length,
+        NULL,
+        NULL
+    );
+
+    ZwClose(pipeHandle);
+
+    if (NT_SUCCESS(status))
+    {
+        DbgPrint("[Process-Protection] Alert sent: PID %lld attacked PID %lld (%s)\r\n",
+            (LONGLONG)(ULONG_PTR)attackerPid,
+            (LONGLONG)(ULONG_PTR)targetPid,
+            AttackType);
+    }
+
+    // Free allocated paths
+    if (targetPath)
+        ExFreePool(targetPath);
+    if (attackerPath)
+        ExFreePool(attackerPath);
+
+    return status;
+}
+
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -49,6 +163,8 @@ OB_PREOP_CALLBACK_STATUS preCall(
     // get process id from the object (object is EPROCESS)
     HANDLE pidHandle = PsGetProcessId((PEPROCESS)pOperationInformation->Object);
     PEPROCESS targetProc = NULL;
+    PEPROCESS currentProc = PsGetCurrentProcess();
+    BOOLEAN alertSent = FALSE;
 
     if (!pidHandle)
         return OB_PREOP_SUCCESS;
@@ -56,16 +172,32 @@ OB_PREOP_CALLBACK_STATUS preCall(
     if (!NT_SUCCESS(PsLookupProcessByProcessId(pidHandle, &targetProc)))
         return OB_PREOP_SUCCESS;
 
-    // Check protection either by full path substrings or by image filename
+    // Check if target process is protected
     if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
     {
-        // handle create
+        // Handle CREATE operation
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
         {
             // use CreateHandleInformation for CREATE
             ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
 
-            // zero out dangerous access in DesiredAccess
+            // Check for dangerous access requests
+            if ((orig & PROCESS_TERMINATE) ||
+                (orig & PROCESS_VM_WRITE) ||
+                (orig & PROCESS_VM_OPERATION) ||
+                (orig == PROCESS_TERMINATE_0) ||
+                (orig == PROCESS_TERMINATE_1) ||
+                (orig == PROCESS_KILL_F))
+            {
+                // Send alert before blocking
+                if (!alertSent)
+                {
+                    SendProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_KILL");
+                    alertSent = TRUE;
+                }
+            }
+
+            // Strip all dangerous access rights
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
@@ -82,7 +214,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
 
-            // logic based on OriginalDesiredAccess (same as your previous logic)
+            // Handle special cases
             if ((orig == PROCESS_TERMINATE_0) ||
                 (orig == PROCESS_TERMINATE_1) ||
                 (orig == PROCESS_KILL_F))
@@ -95,12 +227,25 @@ OB_PREOP_CALLBACK_STATUS preCall(
             }
         }
 
-        // handle duplicate
+        // Handle DUPLICATE operation
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
         {
             // use DuplicateHandleInformation for DUPLICATE
             ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
 
+            // Check for dangerous access
+            if ((orig & PROCESS_TERMINATE) ||
+                (orig & PROCESS_VM_WRITE) ||
+                (orig & PROCESS_VM_OPERATION))
+            {
+                if (!alertSent)
+                {
+                    SendProcessAlertToUserMode(targetProc, currentProc, L"HANDLE_HIJACK");
+                    alertSent = TRUE;
+                }
+            }
+
+            // Strip dangerous rights
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
@@ -173,7 +318,7 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process)
         }
     }
 
-    ExFreePool(pImageName); // free what SeLocateProcessImageName allocated
+    ExFreePool(pImageName);
     return result;
 }
 

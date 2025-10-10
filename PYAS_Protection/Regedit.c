@@ -1,7 +1,10 @@
-﻿#include "Driver_Regedit.h"
+﻿// Regedit.c - Registry protection with user-mode alerting
+#include "Driver_Regedit.h"
+#include <ntstrsafe.h>
 
-#define REG_TAG 'gkER' // 4-byte pool tag
+#define REG_TAG 'gkER'
 #define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OWLYSHIELD"
+#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
 
 LARGE_INTEGER Cookie;
 
@@ -9,6 +12,7 @@ LARGE_INTEGER Cookie;
 NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_ PVOID Argument2);
 BOOLEAN GetNameForRegistryObject(_Out_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject);
 BOOLEAN UnicodeContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
+NTSTATUS SendRegistryAlertToUserMode(PUNICODE_STRING RegPath, PCWSTR Operation);
 
 NTSTATUS RegeditDriverEntry()
 {
@@ -20,6 +24,130 @@ NTSTATUS RegeditUnloadDriver()
 {
     CmUnRegisterCallback(Cookie);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS SendRegistryAlertToUserMode(
+    PUNICODE_STRING RegPath,
+    PCWSTR Operation
+)
+{
+    NTSTATUS status;
+    HANDLE pipeHandle = NULL;
+    IO_STATUS_BLOCK ioStatusBlock;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING pipeName;
+    WCHAR messageBuffer[2048];
+    UNICODE_STRING messageUnicode;
+    PEPROCESS currentProcess = PsGetCurrentProcess();
+    HANDLE currentPid = PsGetCurrentProcessId();
+    PUNICODE_STRING attackerPath = NULL;
+
+    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &pipeName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    // Open pipe
+    status = ZwCreateFile(
+        &pipeHandle,
+        FILE_WRITE_DATA | SYNCHRONIZE,
+        &objAttr,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+
+    // Get attacker process path
+    NTSTATUS pathStatus = SeLocateProcessImageName(currentProcess, &attackerPath);
+    PCWSTR attackerName = (NT_SUCCESS(pathStatus) && attackerPath) ?
+        attackerPath->Buffer : L"Unknown";
+
+    // Build JSON message
+    RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
+
+    // Escape backslashes in registry path for JSON
+    WCHAR escapedRegPath[1024];
+    RtlZeroMemory(escapedRegPath, sizeof(escapedRegPath));
+
+    if (RegPath && RegPath->Buffer && RegPath->Length > 0)
+    {
+        ULONG j = 0;
+        for (ULONG i = 0; i < RegPath->Length / sizeof(WCHAR) && j < 1020; ++i)
+        {
+            if (RegPath->Buffer[i] == L'\\')
+            {
+                escapedRegPath[j++] = L'\\';
+                escapedRegPath[j++] = L'\\';
+            }
+            else
+            {
+                escapedRegPath[j++] = RegPath->Buffer[i];
+            }
+        }
+    }
+
+    status = RtlStringCchPrintfW(
+        messageBuffer,
+        sizeof(messageBuffer) / sizeof(WCHAR),
+        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"REGISTRY_TAMPERING\",\"operation\":\"%s\"}",
+        escapedRegPath,
+        attackerName,
+        (LONGLONG)(ULONG_PTR)currentPid,
+        Operation
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        ZwClose(pipeHandle);
+        if (attackerPath) ExFreePool(attackerPath);
+        return status;
+    }
+
+    RtlInitUnicodeString(&messageUnicode, messageBuffer);
+
+    // Write to pipe
+    status = ZwWriteFile(
+        pipeHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatusBlock,
+        messageUnicode.Buffer,
+        messageUnicode.Length,
+        NULL,
+        NULL
+    );
+
+    ZwClose(pipeHandle);
+
+    if (NT_SUCCESS(status))
+    {
+        DbgPrint("[Registry-Protection] Alert sent: PID %lld attempted %S on %wZ\r\n",
+            (LONGLONG)(ULONG_PTR)currentPid,
+            Operation,
+            RegPath);
+    }
+
+    // Free allocated path
+    if (attackerPath)
+        ExFreePool(attackerPath);
+
+    return status;
 }
 
 // Caller must allocate pRegistryPath->Buffer and set pRegistryPath->MaximumLength
@@ -139,7 +267,11 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                 }
 
                 if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                {
+                    // Send alert before denying
+                    SendRegistryAlertToUserMode(&RegPath, L"DELETE_VALUE");
                     Status = STATUS_ACCESS_DENIED;
+                }
             }
         }
         break;
@@ -153,7 +285,10 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
             if (GetNameForRegistryObject(&RegPath, pInfo->Object))
             {
                 if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                {
+                    SendRegistryAlertToUserMode(&RegPath, L"DELETE_KEY");
                     Status = STATUS_ACCESS_DENIED;
+                }
             }
         }
         break;
@@ -173,7 +308,10 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                 }
 
                 if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                {
+                    SendRegistryAlertToUserMode(&RegPath, L"SET_VALUE");
                     Status = STATUS_ACCESS_DENIED;
+                }
             }
         }
         break;
@@ -193,7 +331,10 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                 }
 
                 if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                {
+                    SendRegistryAlertToUserMode(&RegPath, L"RENAME_KEY");
                     Status = STATUS_ACCESS_DENIED;
+                }
             }
         }
         break;

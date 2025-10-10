@@ -1,11 +1,114 @@
+// File.c - Self-Defense Protection with User-Mode Alerting
 #include "Drvier_File.h"
+#include <ntstrsafe.h>
 
 PVOID CallBackHandle = NULL;
 
+// Pipe name for self-defense alerts
+#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
+
 NTSTATUS FileDriverEntry()
 {
+    // Register file protection callbacks
     ProtectFileByObRegisterCallbacks();
+    DbgPrint("[Self-Defense] File protection initialized\r\n");
     return STATUS_SUCCESS;
+}
+
+NTSTATUS SendAlertToUserMode(
+    PUNICODE_STRING ProtectedFile,
+    PUNICODE_STRING AttackingProcessPath,
+    HANDLE AttackingPid,
+    PCWSTR AttackType
+)
+{
+    NTSTATUS status;
+    HANDLE pipeHandle = NULL;
+    IO_STATUS_BLOCK ioStatusBlock;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING pipeName;
+    WCHAR messageBuffer[2048];
+    UNICODE_STRING messageUnicode;
+
+    // Initialize pipe name
+    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &pipeName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    // Try to open the pipe (non-blocking)
+    status = ZwCreateFile(
+        &pipeHandle,
+        FILE_WRITE_DATA | SYNCHRONIZE,
+        &objAttr,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        // Pipe not available - service may not be running yet
+        return status;
+    }
+
+    // Build JSON-like message for user-mode
+    RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
+
+    PCWSTR protectedName = ProtectedFile->Buffer ? ProtectedFile->Buffer : L"Unknown";
+    PCWSTR attackerPath = AttackingProcessPath->Buffer ? AttackingProcessPath->Buffer : L"Unknown";
+
+    // Use RtlStringCchPrintfW instead of RtlStringCbPrintfW
+    status = RtlStringCchPrintfW(
+        messageBuffer,
+        sizeof(messageBuffer) / sizeof(WCHAR),
+        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"%s\"}",
+        protectedName,
+        attackerPath,
+        (LONGLONG)(ULONG_PTR)AttackingPid,
+        AttackType
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        ZwClose(pipeHandle);
+        return status;
+    }
+
+    RtlInitUnicodeString(&messageUnicode, messageBuffer);
+
+    // Write to pipe
+    status = ZwWriteFile(
+        pipeHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatusBlock,
+        messageUnicode.Buffer,
+        messageUnicode.Length,
+        NULL,
+        NULL
+    );
+
+    ZwClose(pipeHandle);
+
+    if (NT_SUCCESS(status))
+    {
+        DbgPrint("[Self-Defense] Alert sent to user-mode: %wZ attacked by PID %lld\r\n",
+            ProtectedFile, (LONGLONG)(ULONG_PTR)AttackingPid);
+    }
+
+    return status;
 }
 
 NTSTATUS ProtectFileByObRegisterCallbacks()
@@ -42,7 +145,6 @@ NTSTATUS ProtectFileByObRegisterCallbacks()
     return Status;
 }
 
-// Helper function for case-insensitive substring search
 BOOLEAN FilePathContains(PUNICODE_STRING FilePath, PCWSTR Pattern)
 {
     if (!FilePath || !FilePath->Buffer || !Pattern)
@@ -60,6 +162,8 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
     PFILE_OBJECT FileObject = (PFILE_OBJECT)OperationInformation->Object;
     HANDLE CurrentProcessId = PsGetCurrentProcessId();
     BOOLEAN isProtected = FALSE;
+    PEPROCESS currentProcess = PsGetCurrentProcess();
+    PUNICODE_STRING attackerPath = NULL;
 
     if (OperationInformation->ObjectType != *IoFileObjectType)
     {
@@ -121,31 +225,46 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
     {
         if (FileObject->DeleteAccess == TRUE || FileObject->WriteAccess == TRUE)
         {
-            // Block handle creation
+            // Get the attacking process path
+            NTSTATUS status = SeLocateProcessImageName(currentProcess, &attackerPath);
+
+            // Block the operation
             if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             {
                 OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
-                DbgPrint("[PROTECTED] Blocked CREATE access to: %wZ (PID: %ld)\r\n",
+                DbgPrint("[SELF-DEFENSE] Blocked CREATE access to: %wZ by PID: %ld\r\n",
                     &uniFilePath, (ULONG64)CurrentProcessId);
+
+                // Send alert to user-mode
+                if (NT_SUCCESS(status) && attackerPath)
+                {
+                    SendAlertToUserMode(&uniFilePath, attackerPath, CurrentProcessId, L"FILE_TAMPERING");
+                }
             }
 
-            // Block handle duplication
             if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             {
                 OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-                DbgPrint("[PROTECTED] Blocked DUPLICATE access to: %wZ (PID: %ld)\r\n",
+                DbgPrint("[SELF-DEFENSE] Blocked DUPLICATE access to: %wZ by PID: %ld\r\n",
                     &uniFilePath, (ULONG64)CurrentProcessId);
+
+                // Send alert to user-mode
+                if (NT_SUCCESS(status) && attackerPath)
+                {
+                    SendAlertToUserMode(&uniFilePath, attackerPath, CurrentProcessId, L"HANDLE_HIJACK");
+                }
+            }
+
+            // Free the allocated path
+            if (attackerPath)
+            {
+                ExFreePool(attackerPath);
             }
         }
     }
 
-    // Log file access (optional - can be removed for performance)
+    // Optional logging (can be removed for performance)
     RtlVolumeDeviceToDosName(FileObject->DeviceObject, &uniDosName);
-    DbgPrint("PID: %ld File: %wZ%wZ %s\r\n",
-        (ULONG64)CurrentProcessId,
-        &uniDosName,
-        &uniFilePath,
-        isProtected ? "[PROTECTED]" : "");
 
     return OB_PREOP_SUCCESS;
 }
@@ -175,5 +294,6 @@ VOID FileUnloadDriver()
     {
         ObUnRegisterCallbacks(CallBackHandle);
     }
-    DbgPrint("FileDriver Unloaded\r\n");
+
+    DbgPrint("[Self-Defense] FileDriver Unloaded\r\n");
 }
