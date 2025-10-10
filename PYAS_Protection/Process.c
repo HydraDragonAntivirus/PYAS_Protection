@@ -1,159 +1,258 @@
+// Driver_Process.c  -- updated OB callback with path-based protection
+#include <ntifs.h>
 #include "Driver_Process.h"
 
-//定义一个void*类型的变量，它将会作为ObRegisterCallbacks函数的第二个参数。
 PVOID obHandle;
+
+// forward
+BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
+BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process);
+BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
+
+// Entry / register
 NTSTATUS ProcessDriverEntry()
 {
-	ProtectProcess();
-	return STATUS_SUCCESS;
+    ProtectProcess();
+    return STATUS_SUCCESS;
 }
 
-//设置ObRegisterCallBacks回调函数
 NTSTATUS ProtectProcess()
 {
+    OB_CALLBACK_REGISTRATION obReg;
+    OB_OPERATION_REGISTRATION opReg;
 
-	OB_CALLBACK_REGISTRATION obReg;
-	OB_OPERATION_REGISTRATION opReg;
-	memset(&obReg, 0, sizeof(obReg));
-	obReg.Version = ObGetFilterVersion();
-	obReg.OperationRegistrationCount = 1;
-	obReg.RegistrationContext = NULL;
-	RtlInitUnicodeString(&obReg.Altitude, L"321000");
-	//初始化结构体变量
-	memset(&opReg, 0, sizeof(opReg));
-	//下面请注意这个结构体的成员字段的设置
-	opReg.ObjectType = PsProcessType;
-	opReg.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-	//在这里注册一个回调函数指针
-	opReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)&preCall;
-	//注意这一条语句
-	obReg.OperationRegistration = &opReg;
-	//在这里注册回调函数
-	return ObRegisterCallbacks(&obReg, &obHandle);
+    RtlZeroMemory(&obReg, sizeof(obReg));
+    RtlZeroMemory(&opReg, sizeof(opReg));
+
+    obReg.Version = ObGetFilterVersion();
+    obReg.OperationRegistrationCount = 1;
+    obReg.RegistrationContext = NULL;
+    RtlInitUnicodeString(&obReg.Altitude, L"321000");
+
+    // register for process handle create & duplicate
+    opReg.ObjectType = PsProcessType;
+    opReg.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+    opReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)&preCall;
+
+    obReg.OperationRegistration = &opReg;
+
+    return ObRegisterCallbacks(&obReg, &obHandle);
 }
-
 
 OB_PREOP_CALLBACK_STATUS preCall(
-	_In_ PVOID RegistrationContext,
-	_In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
+    _In_ PVOID RegistrationContext,
+    _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
 )
 {
-	//获取pid,这里的HANDLE保存的其实是一个进程pid
-	HANDLE pid = PsGetProcessId((PEPROCESS)pOperationInformation->Object);
-	char szProcName[16] = { 0 };
-	UNREFERENCED_PARAMETER(RegistrationContext);
-	strcpy(szProcName, GetProcessImageNameByProcessID((ULONG)pid));
-	//比较字符串，返回0，则字符串相同
-	if (!_stricmp(szProcName, "HydraDragonAntivirusService.exe"))
-	{
-		//如果创建句柄
-		if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-		{
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-			//OriginalDesiredAccess为原本权限，DesiredAccess为即将要更改的新权限
-			//如果要结束进程,进程管理器结束进程发送0x1001，taskkill指令结束进程发送0x0001，taskkil加/f参数结束进程发送0x1401
-			int code = pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				OriginalDesiredAccess;
+    UNREFERENCED_PARAMETER(RegistrationContext);
 
-			if ((code == PROCESS_TERMINATE_0) ||
-				(code == PROCESS_TERMINATE_1) ||
-				(code == PROCESS_KILL_F))
-				//给进程赋予新权限
-				pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				DesiredAccess = 0x0;
-			//在进程管理器“进程”栏页面结束进程，在返回0x1001值后还会返回1041值，在1041值收到后
-			//再赋予其常规所有操作权限，即可解决“进程”栏页面结束进程导致进程崩溃的情况
-			if (code == 0x1041)
-				pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				DesiredAccess = STANDARD_RIGHTS_ALL;
-		}
-		if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
-		{
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
-			pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-			//OriginalDesiredAccess为原本权限，DesiredAccess为即将要更改的新权限
-			//如果要结束进程,进程管理器结束进程发送0x1001，taskkill指令结束进程发送0x0001，taskkil加/f参数结束进程发送0x1401
-			int code = pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				OriginalDesiredAccess;
+    // get process id from the object (object is EPROCESS)
+    HANDLE pidHandle = PsGetProcessId((PEPROCESS)pOperationInformation->Object);
+    PEPROCESS targetProc = NULL;
 
-			if ((code == PROCESS_TERMINATE_0) ||
-				(code == PROCESS_TERMINATE_1) ||
-				(code == PROCESS_KILL_F))
-				//给进程赋予新权限
-				pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				DesiredAccess = 0x0;
-			//在进程管理器“进程”栏页面结束进程，在返回0x1001值后还会返回1041值，在1041值收到后
-			//再赋予其常规所有操作权限，即可解决“进程”栏页面结束进程导致进程崩溃的情况
-			if (code == 0x1041)
-				pOperationInformation->
-				Parameters->
-				CreateHandleInformation.
-				DesiredAccess = STANDARD_RIGHTS_ALL;
-		}
-	}
-	return OB_PREOP_SUCCESS;
+    if (!pidHandle)
+        return OB_PREOP_SUCCESS;
+
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(pidHandle, &targetProc)))
+        return OB_PREOP_SUCCESS;
+
+    // Check protection either by full path substrings or by image filename
+    if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
+    {
+        // handle create
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        {
+            // use CreateHandleInformation for CREATE
+            ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+
+            // zero out dangerous access in DesiredAccess
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
+
+            // logic based on OriginalDesiredAccess (same as your previous logic)
+            if ((orig == PROCESS_TERMINATE_0) ||
+                (orig == PROCESS_TERMINATE_1) ||
+                (orig == PROCESS_KILL_F))
+            {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0x0;
+            }
+            if (orig == 0x1041)
+            {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
+            }
+        }
+
+        // handle duplicate
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+        {
+            // use DuplicateHandleInformation for DUPLICATE
+            ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
+
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
+
+            if ((orig == PROCESS_TERMINATE_0) ||
+                (orig == PROCESS_TERMINATE_1) ||
+                (orig == PROCESS_KILL_F))
+            {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0x0;
+            }
+            if (orig == 0x1041)
+            {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
+            }
+        }
+    }
+
+    ObDereferenceObject(targetProc);
+    return OB_PREOP_SUCCESS;
 }
 
-//获取进程名函数，根据进程pid获取进程名称
-char* GetProcessImageNameByProcessID(
-	_In_ ULONG ulProcessID
-)
+// Checks if the process image full path contains any of our interesting substrings.
+// Note: SeLocateProcessImageName allocates the returned UNICODE_STRING buffer; free it with ExFreePool.
+BOOLEAN IsProtectedProcessByPath(PEPROCESS Process)
 {
-	NTSTATUS  Status;
-	PEPROCESS  EProcess = NULL;
+    PUNICODE_STRING pImageName = NULL;
+    NTSTATUS status;
+    BOOLEAN result = FALSE;
 
-	Status = PsLookupProcessByProcessId(
-		(HANDLE)ulProcessID,
-		&EProcess);    //EPROCESS
+    // SeLocateProcessImageName returns allocated UNICODE_STRING (free with ExFreePool)
+    status = SeLocateProcessImageName(Process, &pImageName);
+    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer)
+    {
+        if (pImageName)
+            ExFreePool(pImageName);
+        return FALSE;
+    }
 
-	//通过句柄获取EProcess
-	if (!NT_SUCCESS(Status))
-		return FALSE;
-	ObDereferenceObject(EProcess);
-	//通过EProcess获得进程名称
-	return (char*)PsGetProcessImageFileName(EProcess);
+    // Patterns to match (not full hardcoded absolute paths; substring-based)
+    static const PCWSTR patterns[] = {
+        L"\\HydraDragonAntivirus\\",
+        L"\\hydradragon\\",
+        L"\\Owlyshield Service\\",
+        L"\\owlyshield_ransom.exe",
+        L"\\Sanctum\\",
+        L"\\sanctum_ppl_runner.exe",
+        L"\\app.exe",
+        L"\\server.exe",
+        L"\\um_engine.exe"
+    };
+
+    for (ULONG i = 0; i < ARRAYSIZE(patterns); ++i)
+    {
+        if (UnicodeStringContainsInsensitive(pImageName, patterns[i]))
+        {
+            result = TRUE;
+            break;
+        }
+    }
+
+    ExFreePool(pImageName); // free what SeLocateProcessImageName allocated
+    return result;
 }
 
+// Fallback: still protect by image file name (PsGetProcessImageFileName returns ANSI 15-char name)
+BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process)
+{
+    PUCHAR name = PsGetProcessImageFileName(Process);
+    if (!name)
+        return FALSE;
+
+    // list of exact filenames we also protect
+    const char* names[] = {
+        "HydraDragonAntivirusService.exe",
+        "owlyshield_ransom.exe",
+        "sanctum_ppl_runner.exe",
+        "app.exe",
+        "server.exe",
+        "um_engine.exe"
+    };
+
+    for (ULONG i = 0; i < ARRAYSIZE(names); ++i)
+    {
+        if (_stricmp((const char*)name, names[i]) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+// Case-insensitive substring search using RtlUpcaseUnicodeString.
+// Returns TRUE if 'Pattern' is found inside 'Source' (case-insensitive).
+BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
+{
+    if (!Source || !Source->Buffer || !Pattern)
+        return FALSE;
+
+    UNICODE_STRING srcU = *Source;
+    UNICODE_STRING patU;
+    RtlInitUnicodeString(&patU, Pattern);
+
+    // Make uppercase copies (RtlUpcaseUnicodeString will allocate if third param TRUE)
+    UNICODE_STRING srcUp, patUp;
+    RtlZeroMemory(&srcUp, sizeof(srcUp));
+    RtlZeroMemory(&patUp, sizeof(patUp));
+
+    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&srcUp, &srcU, TRUE)))
+        return FALSE;
+    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&patUp, &patU, TRUE)))
+    {
+        RtlFreeUnicodeString(&srcUp);
+        return FALSE;
+    }
+
+    BOOLEAN found = FALSE;
+    ULONG srcLen = srcUp.Length / sizeof(WCHAR);
+    ULONG patLen = patUp.Length / sizeof(WCHAR);
+
+    if (patLen > 0 && patLen <= srcLen)
+    {
+        PWCHAR s = srcUp.Buffer;
+        PWCHAR p = patUp.Buffer;
+
+        for (ULONG i = 0; i + patLen <= srcLen; ++i)
+        {
+            if (RtlEqualMemory(&s[i], p, patLen * sizeof(WCHAR)))
+            {
+                found = TRUE;
+                break;
+            }
+        }
+    }
+
+    RtlFreeUnicodeString(&srcUp);
+    RtlFreeUnicodeString(&patUp);
+    return found;
+}
 
 NTSTATUS ProcessDriverUnload()
 {
-	ObUnRegisterCallbacks(obHandle);
-	return STATUS_SUCCESS;
+    if (obHandle)
+        ObUnRegisterCallbacks(obHandle);
+    return STATUS_SUCCESS;
 }

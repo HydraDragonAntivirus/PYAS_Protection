@@ -179,7 +179,7 @@
     </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <Inf Include="SimpleProcessProtection.inf" />
+    <Inf Include="SimplePYASProtection.inf" />
   </ItemGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />
