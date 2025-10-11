@@ -4,6 +4,8 @@
 
 #define REG_TAG 'gkER'
 #define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OWLYSHIELD"
+#define REG_PROTECT_KEY L"\Run\HydraDragonAntivirus"
+#define REG_PROTECT_DIR L"\Run\HydraDragonAntivirus"
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
 
 LARGE_INTEGER Cookie;
@@ -87,25 +89,28 @@ NTSTATUS SendRegistryAlertToUserMode(
     if (RegPath && RegPath->Buffer && RegPath->Length > 0)
     {
         ULONG j = 0;
-        for (ULONG i = 0; i < RegPath->Length / sizeof(WCHAR) && j < 1020; ++i)
+        for (ULONG i = 0; i < RegPath->Length / sizeof(WCHAR) && j + 1 < ARRAYSIZE(escapedRegPath); ++i)
         {
             if (RegPath->Buffer[i] == L'\\')
             {
-                escapedRegPath[j++] = L'\\';
-                escapedRegPath[j++] = L'\\';
+                if (j + 2 < ARRAYSIZE(escapedRegPath)) {
+                    escapedRegPath[j++] = L'\\';
+                    escapedRegPath[j++] = L'\\';
+                }
             }
             else
             {
                 escapedRegPath[j++] = RegPath->Buffer[i];
             }
         }
+        escapedRegPath[j] = L'\0';
     }
 
     status = RtlStringCchPrintfW(
         messageBuffer,
         sizeof(messageBuffer) / sizeof(WCHAR),
         L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"REGISTRY_TAMPERING\",\"operation\":\"%s\"}",
-        escapedRegPath,
+        escapedRegPath[0] ? escapedRegPath : L"",
         attackerName,
         (LONGLONG)(ULONG_PTR)currentPid,
         Operation
@@ -266,7 +271,10 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                     RtlAppendUnicodeStringToString(&RegPath, pInfo->ValueName);
                 }
 
-                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                // Check protected subpath or Run\PYAS key
+                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
                 {
                     // Send alert before denying
                     SendRegistryAlertToUserMode(&RegPath, L"DELETE_VALUE");
@@ -284,7 +292,9 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
         {
             if (GetNameForRegistryObject(&RegPath, pInfo->Object))
             {
-                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY))
                 {
                     SendRegistryAlertToUserMode(&RegPath, L"DELETE_KEY");
                     Status = STATUS_ACCESS_DENIED;
@@ -307,7 +317,9 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                     RtlAppendUnicodeStringToString(&RegPath, pInfo->ValueName);
                 }
 
-                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
                 {
                     SendRegistryAlertToUserMode(&RegPath, L"SET_VALUE");
                     Status = STATUS_ACCESS_DENIED;
@@ -330,7 +342,9 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                     RtlAppendUnicodeStringToString(&RegPath, pInfo->NewName);
                 }
 
-                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH))
+                if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
+                    UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
                 {
                     SendRegistryAlertToUserMode(&RegPath, L"RENAME_KEY");
                     Status = STATUS_ACCESS_DENIED;

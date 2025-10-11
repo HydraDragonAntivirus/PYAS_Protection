@@ -189,7 +189,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
     // Only .exe, .sys, .dll files are protected
     static const PCWSTR protectedPatterns[] = {
         // HydraDragonAntivirus Service
-        L"\\HydraDragonAntivirus\\HydraDragonAntivirusService.exe",
+        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
 
         // Owlyshield Service executables and DLLs
         L"\\Owlyshield Service\\owlyshield_ransom.exe",

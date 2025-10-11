@@ -331,7 +331,7 @@ BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process)
 
     // list of exact filenames we also protect
     const char* names[] = {
-        "HydraDragonAntivirusService.exe",
+        "HydraDragonAntivirusLauncher.exe",
         "owlyshield_ransom.exe",
         "sanctum_ppl_runner.exe",
         "app.exe",
