@@ -195,7 +195,6 @@
     <ClCompile Include="File.c" />
     <ClCompile Include="Process.c" />
     <ClCompile Include="Regedit.c" />
-    <ClCompile Include="ServiceProtection.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
