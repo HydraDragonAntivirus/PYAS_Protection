@@ -1,5 +1,6 @@
 #include "Driver.h"
-// 绕过签名检查
+
+// Bypass driver signature enforcement
 BOOLEAN BypassCheckSign(PDRIVER_OBJECT pDriverObject)
 {
 #ifdef _WIN64
@@ -42,47 +43,61 @@ BOOLEAN BypassCheckSign(PDRIVER_OBJECT pDriverObject)
 #endif
 
 	PKLDR_DATA_TABLE_ENTRY pLdrData = (PKLDR_DATA_TABLE_ENTRY)pDriverObject->DriverSection;
-	pLdrData->Flags = pLdrData->Flags | 0x20;
+	pLdrData->Flags |= 0x20;
 
 	return TRUE;
 }
+
+// DriverEntry
 NTSTATUS DriverEntry(
 	_In_ PDRIVER_OBJECT pDriverObj,
 	_In_ PUNICODE_STRING pRegistryString
 )
 {
+	UNREFERENCED_PARAMETER(pRegistryString);
+
 	BypassCheckSign(pDriverObj);
+	pDriverObj->DriverUnload = DriverUnload;
+
 #if _WIN64
-	NTSTATUS status = STATUS_SUCCESS;
-	PLDR_DATA_TABLE_ENTRY64 ldr;
-
-	pDriverObj->DriverUnload = DriverUnload;
-	//绕过MmVerifyCallbackFunction。
-	ldr = (PLDR_DATA_TABLE_ENTRY64)pDriverObj->DriverSection;
+	PLDR_DATA_TABLE_ENTRY64 ldr = (PLDR_DATA_TABLE_ENTRY64)pDriverObj->DriverSection;
 	ldr->Flags |= 0x20;
-	ProcessDriverEntry();
-	FileDriverEntry();
-	RegeditDriverEntry();
 #else
-	NTSTATUS status = STATUS_SUCCESS;
-	PLDR_DATA_TABLE_ENTRY32 ldr;
-
-	pDriverObj->DriverUnload = DriverUnload;
-	//绕过MmVerifyCallbackFunction。
-	ldr = (PLDR_DATA_TABLE_ENTRY32)pDriverObj->DriverSection;
+	PLDR_DATA_TABLE_ENTRY32 ldr = (PLDR_DATA_TABLE_ENTRY32)pDriverObj->DriverSection;
 	ldr->Flags |= 0x20;
+#endif
+
+	// Initialize core modules
 	ProcessDriverEntry();
 	FileDriverEntry();
 	RegeditDriverEntry();
-#endif
+
+	// Initialize service protection
+	NTSTATUS status = InitializeServiceProtection();
+	if (!NT_SUCCESS(status))
+	{
+		DbgPrint("[Driver] Failed to initialize service protection: 0x%X\n", status);
+	}
+	else
+	{
+		DbgPrint("[Driver] Service protection initialized successfully\n");
+	}
 
 	return STATUS_SUCCESS;
 }
+
+// DriverUnload
 NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj)
 {
 	UNREFERENCED_PARAMETER(pDriverObj);
+
+	// Cleanup service protection
+	CleanupServiceProtection();
+
+	// Cleanup other modules
 	ProcessDriverUnload();
 	FileUnloadDriver();
 	RegeditUnloadDriver();
+
 	return STATUS_SUCCESS;
 }
