@@ -1,4 +1,4 @@
-// Process.c - Process protection with user-mode alerting
+// Process.c - Process protection with user-mode alerting (FIXED)
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include "Driver_Process.h"
@@ -7,17 +7,35 @@ PVOID obHandle;
 
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
 
+// Work item for deferred alerts
+typedef struct _PROCESS_ALERT_WORK_ITEM {
+    WORK_QUEUE_ITEM WorkItem;
+    UNICODE_STRING TargetPath;
+    UNICODE_STRING AttackerPath;
+    HANDLE TargetPid;
+    HANDLE AttackerPid;
+    WCHAR AttackType[64];
+} PROCESS_ALERT_WORK_ITEM, * PPROCESS_ALERT_WORK_ITEM;
+
 // Forward declarations
 BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
 BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process);
 BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
-NTSTATUS SendProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
+VOID ProcessAlertWorker(PVOID Context);
+NTSTATUS QueueProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
 
-// Entry / register
 NTSTATUS ProcessDriverEntry()
 {
-    ProtectProcess();
-    return STATUS_SUCCESS;
+    NTSTATUS status = ProtectProcess();
+    if (NT_SUCCESS(status))
+    {
+        DbgPrint("[Process-Protection] Initialized successfully\r\n");
+    }
+    else
+    {
+        DbgPrint("[Process-Protection] Failed to initialize: 0x%X\r\n", status);
+    }
+    return status;
 }
 
 NTSTATUS ProtectProcess()
@@ -33,33 +51,31 @@ NTSTATUS ProtectProcess()
     obReg.RegistrationContext = NULL;
     RtlInitUnicodeString(&obReg.Altitude, L"321000");
 
-    // register for process handle create & duplicate
     opReg.ObjectType = PsProcessType;
     opReg.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
     opReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)&preCall;
 
     obReg.OperationRegistration = &opReg;
 
-    return ObRegisterCallbacks(&obReg, &obHandle);
+    NTSTATUS status = ObRegisterCallbacks(&obReg, &obHandle);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint("[Process-Protection] ObRegisterCallbacks failed: 0x%X\r\n", status);
+    }
+
+    return status;
 }
 
-NTSTATUS SendProcessAlertToUserMode(
-    PEPROCESS TargetProcess,
-    PEPROCESS AttackerProcess,
-    PCWSTR AttackType
-)
+// Worker routine running at PASSIVE_LEVEL
+VOID ProcessAlertWorker(PVOID Context)
 {
+    PPROCESS_ALERT_WORK_ITEM workItem = (PPROCESS_ALERT_WORK_ITEM)Context;
     NTSTATUS status;
     HANDLE pipeHandle = NULL;
     IO_STATUS_BLOCK ioStatusBlock;
     OBJECT_ATTRIBUTES objAttr;
     UNICODE_STRING pipeName;
     WCHAR messageBuffer[2048];
-    UNICODE_STRING messageUnicode;
-    PUNICODE_STRING targetPath = NULL;
-    PUNICODE_STRING attackerPath = NULL;
-    HANDLE targetPid = PsGetProcessId(TargetProcess);
-    HANDLE attackerPid = PsGetProcessId(AttackerProcess);
 
     RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
 
@@ -81,45 +97,39 @@ NTSTATUS SendProcessAlertToUserMode(
         FILE_ATTRIBUTE_NORMAL,
         0,
         FILE_OPEN,
-        FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
         NULL,
         0
     );
 
     if (!NT_SUCCESS(status))
     {
-        return status;
+        goto Cleanup;
     }
 
-    // Get process paths
-    status = SeLocateProcessImageName(TargetProcess, &targetPath);
-    NTSTATUS attackerStatus = SeLocateProcessImageName(AttackerProcess, &attackerPath);
+    PCWSTR targetName = workItem->TargetPath.Buffer ? workItem->TargetPath.Buffer : L"Unknown";
+    PCWSTR attackerName = workItem->AttackerPath.Buffer ? workItem->AttackerPath.Buffer : L"Unknown";
 
-    PCWSTR targetName = (NT_SUCCESS(status) && targetPath) ? targetPath->Buffer : L"Unknown";
-    PCWSTR attackerName = (NT_SUCCESS(attackerStatus) && attackerPath) ? attackerPath->Buffer : L"Unknown";
-
-    // Build JSON message using RtlStringCchPrintfW
+    // Build JSON message
     RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
-    status = RtlStringCchPrintfW(
+    status = RtlStringCbPrintfW(
         messageBuffer,
-        sizeof(messageBuffer) / sizeof(WCHAR),
+        sizeof(messageBuffer),
         L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"%s\",\"target_pid\":%lld}",
         targetName,
         attackerName,
-        (LONGLONG)(ULONG_PTR)attackerPid,
-        AttackType,
-        (LONGLONG)(ULONG_PTR)targetPid
+        (LONGLONG)(ULONG_PTR)workItem->AttackerPid,
+        workItem->AttackType,
+        (LONGLONG)(ULONG_PTR)workItem->TargetPid
     );
 
     if (!NT_SUCCESS(status))
     {
         ZwClose(pipeHandle);
-        if (targetPath) ExFreePool(targetPath);
-        if (attackerPath) ExFreePool(attackerPath);
-        return status;
+        goto Cleanup;
     }
 
-    RtlInitUnicodeString(&messageUnicode, messageBuffer);
+    SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
 
     // Write to pipe
     status = ZwWriteFile(
@@ -128,8 +138,8 @@ NTSTATUS SendProcessAlertToUserMode(
         NULL,
         NULL,
         &ioStatusBlock,
-        messageUnicode.Buffer,
-        messageUnicode.Length,
+        messageBuffer,
+        (ULONG)messageLength,
         NULL,
         NULL
     );
@@ -139,18 +149,97 @@ NTSTATUS SendProcessAlertToUserMode(
     if (NT_SUCCESS(status))
     {
         DbgPrint("[Process-Protection] Alert sent: PID %lld attacked PID %lld (%s)\r\n",
-            (LONGLONG)(ULONG_PTR)attackerPid,
-            (LONGLONG)(ULONG_PTR)targetPid,
-            AttackType);
+            (LONGLONG)(ULONG_PTR)workItem->AttackerPid,
+            (LONGLONG)(ULONG_PTR)workItem->TargetPid,
+            workItem->AttackType);
     }
 
-    // Free allocated paths
+Cleanup:
+    // Free allocated strings
+    if (workItem->TargetPath.Buffer)
+        ExFreePool(workItem->TargetPath.Buffer);
+    if (workItem->AttackerPath.Buffer)
+        ExFreePool(workItem->AttackerPath.Buffer);
+
+    ExFreePoolWithTag(workItem, 'crpA');
+}
+
+NTSTATUS QueueProcessAlertToUserMode(
+    PEPROCESS TargetProcess,
+    PEPROCESS AttackerProcess,
+    PCWSTR AttackType
+)
+{
+    PPROCESS_ALERT_WORK_ITEM workItem;
+    PUNICODE_STRING targetPath = NULL;
+    PUNICODE_STRING attackerPath = NULL;
+    NTSTATUS status;
+
+    // Allocate work item
+    workItem = (PPROCESS_ALERT_WORK_ITEM)ExAllocatePoolWithTag(
+        NonPagedPool,
+        sizeof(PROCESS_ALERT_WORK_ITEM),
+        'crpA'
+    );
+
+    if (!workItem)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlZeroMemory(workItem, sizeof(PROCESS_ALERT_WORK_ITEM));
+
+    // Get process paths
+    status = SeLocateProcessImageName(TargetProcess, &targetPath);
+    if (NT_SUCCESS(status) && targetPath && targetPath->Buffer && targetPath->Length > 0)
+    {
+        workItem->TargetPath.Length = targetPath->Length;
+        workItem->TargetPath.MaximumLength = targetPath->Length + sizeof(WCHAR);
+        workItem->TargetPath.Buffer = (PWCHAR)ExAllocatePoolWithTag(
+            NonPagedPool,
+            workItem->TargetPath.MaximumLength,
+            'crpA'
+        );
+
+        if (workItem->TargetPath.Buffer)
+        {
+            RtlCopyMemory(workItem->TargetPath.Buffer, targetPath->Buffer, targetPath->Length);
+            workItem->TargetPath.Buffer[targetPath->Length / sizeof(WCHAR)] = L'\0';
+        }
+    }
+
+    status = SeLocateProcessImageName(AttackerProcess, &attackerPath);
+    if (NT_SUCCESS(status) && attackerPath && attackerPath->Buffer && attackerPath->Length > 0)
+    {
+        workItem->AttackerPath.Length = attackerPath->Length;
+        workItem->AttackerPath.MaximumLength = attackerPath->Length + sizeof(WCHAR);
+        workItem->AttackerPath.Buffer = (PWCHAR)ExAllocatePoolWithTag(
+            NonPagedPool,
+            workItem->AttackerPath.MaximumLength,
+            'crpA'
+        );
+
+        if (workItem->AttackerPath.Buffer)
+        {
+            RtlCopyMemory(workItem->AttackerPath.Buffer, attackerPath->Buffer, attackerPath->Length);
+            workItem->AttackerPath.Buffer[attackerPath->Length / sizeof(WCHAR)] = L'\0';
+        }
+    }
+
+    // Free the allocated paths from SeLocateProcessImageName
     if (targetPath)
         ExFreePool(targetPath);
     if (attackerPath)
         ExFreePool(attackerPath);
 
-    return status;
+    // Copy PIDs and attack type
+    workItem->TargetPid = PsGetProcessId(TargetProcess);
+    workItem->AttackerPid = PsGetProcessId(AttackerProcess);
+    RtlStringCbCopyW(workItem->AttackType, sizeof(workItem->AttackType), AttackType);
+
+    // Queue work item
+    ExInitializeWorkItem(&workItem->WorkItem, ProcessAlertWorker, workItem);
+    ExQueueWorkItem(&workItem->WorkItem, DelayedWorkQueue);
+
+    return STATUS_SUCCESS;
 }
 
 OB_PREOP_CALLBACK_STATUS preCall(
@@ -160,7 +249,6 @@ OB_PREOP_CALLBACK_STATUS preCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // get process id from the object (object is EPROCESS)
     HANDLE pidHandle = PsGetProcessId((PEPROCESS)pOperationInformation->Object);
     PEPROCESS targetProc = NULL;
     PEPROCESS currentProc = PsGetCurrentProcess();
@@ -172,107 +260,108 @@ OB_PREOP_CALLBACK_STATUS preCall(
     if (!NT_SUCCESS(PsLookupProcessByProcessId(pidHandle, &targetProc)))
         return OB_PREOP_SUCCESS;
 
-    // Check if target process is protected
-    if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
+    __try
     {
-        // Handle CREATE operation
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        // Check if target process is protected
+        if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
         {
-            // use CreateHandleInformation for CREATE
-            ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
-
-            // Check for dangerous access requests
-            if ((orig & PROCESS_TERMINATE) ||
-                (orig & PROCESS_VM_WRITE) ||
-                (orig & PROCESS_VM_OPERATION) ||
-                (orig == PROCESS_TERMINATE_0) ||
-                (orig == PROCESS_TERMINATE_1) ||
-                (orig == PROCESS_KILL_F))
+            // Handle CREATE operation
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             {
-                // Send alert before blocking
-                if (!alertSent)
+                ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+
+                // Check for dangerous access requests
+                if ((orig & PROCESS_TERMINATE) ||
+                    (orig & PROCESS_VM_WRITE) ||
+                    (orig & PROCESS_VM_OPERATION) ||
+                    (orig == PROCESS_TERMINATE_0) ||
+                    (orig == PROCESS_TERMINATE_1) ||
+                    (orig == PROCESS_KILL_F))
                 {
-                    SendProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_KILL");
-                    alertSent = TRUE;
+                    if (!alertSent)
+                    {
+                        QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_KILL");
+                        alertSent = TRUE;
+                    }
+                }
+
+                // Strip all dangerous access rights
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
+
+                if ((orig == PROCESS_TERMINATE_0) ||
+                    (orig == PROCESS_TERMINATE_1) ||
+                    (orig == PROCESS_KILL_F))
+                {
+                    pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0x0;
+                }
+                if (orig == 0x1041)
+                {
+                    pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
                 }
             }
 
-            // Strip all dangerous access rights
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
-
-            // Handle special cases
-            if ((orig == PROCESS_TERMINATE_0) ||
-                (orig == PROCESS_TERMINATE_1) ||
-                (orig == PROCESS_KILL_F))
+            // Handle DUPLICATE operation
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0x0;
-            }
-            if (orig == 0x1041)
-            {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
-            }
-        }
+                ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
 
-        // Handle DUPLICATE operation
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
-        {
-            // use DuplicateHandleInformation for DUPLICATE
-            ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
-
-            // Check for dangerous access
-            if ((orig & PROCESS_TERMINATE) ||
-                (orig & PROCESS_VM_WRITE) ||
-                (orig & PROCESS_VM_OPERATION))
-            {
-                if (!alertSent)
+                if ((orig & PROCESS_TERMINATE) ||
+                    (orig & PROCESS_VM_WRITE) ||
+                    (orig & PROCESS_VM_OPERATION))
                 {
-                    SendProcessAlertToUserMode(targetProc, currentProc, L"HANDLE_HIJACK");
-                    alertSent = TRUE;
+                    if (!alertSent)
+                    {
+                        QueueProcessAlertToUserMode(targetProc, currentProc, L"HANDLE_HIJACK");
+                        alertSent = TRUE;
+                    }
+                }
+
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
+
+                if ((orig == PROCESS_TERMINATE_0) ||
+                    (orig == PROCESS_TERMINATE_1) ||
+                    (orig == PROCESS_KILL_F))
+                {
+                    pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0x0;
+                }
+                if (orig == 0x1041)
+                {
+                    pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
                 }
             }
-
-            // Strip dangerous rights
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_TERMINATE;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_THREAD;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_SESSIONID;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_OPERATION;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_READ;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_VM_WRITE;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DUP_HANDLE;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_CREATE_PROCESS;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_QUOTA;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_INFORMATION;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_INFORMATION;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SUSPEND_RESUME;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_SET_LIMITED_INFORMATION;
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-
-            if ((orig == PROCESS_TERMINATE_0) ||
-                (orig == PROCESS_TERMINATE_1) ||
-                (orig == PROCESS_KILL_F))
-            {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0x0;
-            }
-            if (orig == 0x1041)
-            {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL;
-            }
         }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("[Process-Protection] Exception in preCall: 0x%X\r\n", GetExceptionCode());
     }
 
     ObDereferenceObject(targetProc);
@@ -398,6 +487,10 @@ BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
 NTSTATUS ProcessDriverUnload()
 {
     if (obHandle)
+    {
         ObUnRegisterCallbacks(obHandle);
+        obHandle = NULL;
+    }
+    DbgPrint("[Process-Protection] Unloaded\r\n");
     return STATUS_SUCCESS;
 }
