@@ -1,4 +1,4 @@
-// Process.c - Process protection with user-mode alerting (FIXED)
+// Process.c - Process protection with user-mode alerting (FIXED + THREAD PROTECTION)
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include "Driver_Process.h"
@@ -20,9 +20,11 @@ typedef struct _PROCESS_ALERT_WORK_ITEM {
 // Forward declarations
 BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
 BOOLEAN IsProtectedProcessByImageName(PEPROCESS Process);
+BOOLEAN IsProtectedThread(PETHREAD Thread);
 BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
 VOID ProcessAlertWorker(PVOID Context);
 NTSTATUS QueueProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
+OB_PREOP_CALLBACK_STATUS threadPreCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation);
 
 NTSTATUS ProcessDriverEntry()
 {
@@ -41,21 +43,27 @@ NTSTATUS ProcessDriverEntry()
 NTSTATUS ProtectProcess()
 {
     OB_CALLBACK_REGISTRATION obReg;
-    OB_OPERATION_REGISTRATION opReg;
+    OB_OPERATION_REGISTRATION opReg[2];  // Now we need 2: one for process, one for thread
 
     RtlZeroMemory(&obReg, sizeof(obReg));
     RtlZeroMemory(&opReg, sizeof(opReg));
 
     obReg.Version = ObGetFilterVersion();
-    obReg.OperationRegistrationCount = 1;
+    obReg.OperationRegistrationCount = 2;  // Changed from 1 to 2
     obReg.RegistrationContext = NULL;
     RtlInitUnicodeString(&obReg.Altitude, L"321000");
 
-    opReg.ObjectType = PsProcessType;
-    opReg.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-    opReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)&preCall;
+    // Process protection
+    opReg[0].ObjectType = PsProcessType;
+    opReg[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+    opReg[0].PreOperation = (POB_PRE_OPERATION_CALLBACK)&preCall;
 
-    obReg.OperationRegistration = &opReg;
+    // Thread protection (NEW)
+    opReg[1].ObjectType = PsThreadType;
+    opReg[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+    opReg[1].PreOperation = (POB_PRE_OPERATION_CALLBACK)&threadPreCall;
+
+    obReg.OperationRegistration = opReg;
 
     NTSTATUS status = ObRegisterCallbacks(&obReg, &obHandle);
     if (!NT_SUCCESS(status))
@@ -240,6 +248,108 @@ NTSTATUS QueueProcessAlertToUserMode(
     ExQueueWorkItem(&workItem->WorkItem, DelayedWorkQueue);
 
     return STATUS_SUCCESS;
+}
+
+// NEW: Thread protection callback
+OB_PREOP_CALLBACK_STATUS threadPreCall(
+    _In_ PVOID RegistrationContext,
+    _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
+)
+{
+    UNREFERENCED_PARAMETER(RegistrationContext);
+
+    PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
+    PEPROCESS targetProc = NULL;
+    PEPROCESS currentProc = PsGetCurrentProcess();
+    BOOLEAN alertSent = FALSE;
+
+    if (!targetThread)
+        return OB_PREOP_SUCCESS;
+
+    // Get the process that owns this thread
+    targetProc = PsGetThreadProcess(targetThread);
+    if (!targetProc)
+        return OB_PREOP_SUCCESS;
+
+    __try
+    {
+        // Check if this thread belongs to a protected process
+        if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
+        {
+            // Allow the protected process to manage its own threads
+            if (targetProc == currentProc)
+            {
+                return OB_PREOP_SUCCESS;
+            }
+            // Handle CREATE operation
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+            {
+                ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+
+                // Check for thread suspension or termination attempts
+                if ((orig & THREAD_SUSPEND_RESUME) ||
+                    (orig & THREAD_TERMINATE) ||
+                    (orig & THREAD_SET_CONTEXT))
+                {
+                    if (!alertSent)
+                    {
+                        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_SUSPEND");
+                        alertSent = TRUE;
+                    }
+                }
+
+                // Strip all dangerous thread access rights
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_TERMINATE;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_SUSPEND_RESUME;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_SET_CONTEXT;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_SET_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_SET_THREAD_TOKEN;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_IMPERSONATE;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DIRECT_IMPERSONATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_SET_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_QUERY_LIMITED_INFORMATION;
+
+                // Allow only basic query rights
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= (THREAD_QUERY_INFORMATION | SYNCHRONIZE);
+            }
+
+            // Handle DUPLICATE operation
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+            {
+                ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
+
+                if ((orig & THREAD_SUSPEND_RESUME) ||
+                    (orig & THREAD_TERMINATE) ||
+                    (orig & THREAD_SET_CONTEXT))
+                {
+                    if (!alertSent)
+                    {
+                        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_HIJACK");
+                        alertSent = TRUE;
+                    }
+                }
+
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_TERMINATE;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_SUSPEND_RESUME;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_SET_CONTEXT;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_SET_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_SET_THREAD_TOKEN;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_IMPERSONATE;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DIRECT_IMPERSONATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_SET_LIMITED_INFORMATION;
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_QUERY_LIMITED_INFORMATION;
+
+                // Allow only basic query rights
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= (THREAD_QUERY_INFORMATION | SYNCHRONIZE);
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("[Thread-Protection] Exception in threadPreCall: 0x%X\r\n", GetExceptionCode());
+    }
+
+    return OB_PREOP_SUCCESS;
 }
 
 OB_PREOP_CALLBACK_STATUS preCall(
