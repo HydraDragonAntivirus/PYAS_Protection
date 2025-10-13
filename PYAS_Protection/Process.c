@@ -277,7 +277,8 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
         {
             // Allow the protected process to manage its own threads
-            if (targetProc == currentProc)
+            // Check both by object pointer and by PID to catch all self-access cases
+            if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
             {
                 return OB_PREOP_SUCCESS;
             }
@@ -375,6 +376,13 @@ OB_PREOP_CALLBACK_STATUS preCall(
         // Check if target process is protected
         if (IsProtectedProcessByPath(targetProc) || IsProtectedProcessByImageName(targetProc))
         {
+            // Allow the protected process to manage itself
+            // Check both by object pointer and by PID to catch all self-access cases
+            if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
+            {
+                ObDereferenceObject(targetProc);
+                return OB_PREOP_SUCCESS;
+            }
             // Handle CREATE operation
             if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             {
