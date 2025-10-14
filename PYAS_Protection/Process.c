@@ -19,7 +19,6 @@ typedef struct _PROCESS_ALERT_WORK_ITEM {
 
 // Forward declarations
 BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
-BOOLEAN IsProtectedThread(PETHREAD Thread);
 BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
 VOID ProcessAlertWorker(PVOID Context);
 NTSTATUS QueueProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
