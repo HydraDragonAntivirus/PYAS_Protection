@@ -72,17 +72,6 @@ NTSTATUS DriverEntry(
 	FileDriverEntry();
 	RegeditDriverEntry();
 
-	// Initialize service protection
-	NTSTATUS status = InitializeServiceProtection();
-	if (!NT_SUCCESS(status))
-	{
-		DbgPrint("[Driver] Failed to initialize service protection: 0x%X\n", status);
-	}
-	else
-	{
-		DbgPrint("[Driver] Service protection initialized successfully\n");
-	}
-
 	return STATUS_SUCCESS;
 }
 
@@ -90,9 +79,6 @@ NTSTATUS DriverEntry(
 NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj)
 {
 	UNREFERENCED_PARAMETER(pDriverObj);
-
-	// Cleanup service protection
-	CleanupServiceProtection();
 
 	// Cleanup other modules
 	ProcessDriverUnload();
