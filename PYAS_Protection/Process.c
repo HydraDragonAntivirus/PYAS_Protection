@@ -217,21 +217,23 @@ OB_PREOP_CALLBACK_STATUS preCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
+    // First, identify the process INITIATING the action (the caller).
+    PEPROCESS currentProc = PsGetCurrentProcess();
+    HANDLE callerPid = PsGetProcessId(currentProc);
+
+    // If the caller is one of our protected processes, trust it completely.
+    if (IsProtectedProcessByPid(callerPid)) {
+        return OB_PREOP_SUCCESS; // Allow the operation immediately.
+    }
+
+    // --- If the caller is NOT protected, we proceed to check the target ---
+
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // Check if the target is a process we are protecting
+    // Check if the target is a process we are protecting from an untrusted caller.
     if (IsProtectedProcessByPid(targetPid)) {
-        PEPROCESS currentProc = PsGetCurrentProcess();
-        HANDLE callerPid = PsGetProcessId(currentProc);
-
-        // <<< [MODIFICATION] - Allow if the CALLER is also a protected process. >>>
-        if (targetProc == currentProc || IsProtectedProcessByPid(callerPid)) {
-            // This is either a self-operation or an operation from another trusted process. Allow it.
-            return OB_PREOP_SUCCESS;
-        }
-
-        // Handle CREATE operations from untrusted callers
+        // Handle CREATE operations
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
@@ -240,7 +242,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
             }
         }
 
-        // Handle DUPLICATE operations from untrusted callers
+        // Handle DUPLICATE operations
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
@@ -260,6 +262,17 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
+    // First, identify the process INITIATING the action (the caller).
+    PEPROCESS currentProc = PsGetCurrentProcess();
+    HANDLE callerPid = PsGetProcessId(currentProc);
+
+    // If the caller is one of our protected processes, trust it completely.
+    if (IsProtectedProcessByPid(callerPid)) {
+        return OB_PREOP_SUCCESS; // Allow the operation immediately.
+    }
+
+    // --- If the caller is NOT protected, we proceed to check the target ---
+
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
     PEPROCESS targetProc = PsGetThreadProcess(targetThread);
 
@@ -267,18 +280,9 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Check if the thread's parent process is protected
+    // Check if the thread's parent process is being protected from an untrusted caller.
     if (IsProtectedProcessByPid(PsGetProcessId(targetProc))) {
-        PEPROCESS currentProc = PsGetCurrentProcess();
-        HANDLE callerPid = PsGetProcessId(currentProc);
-
-        // <<< [MODIFICATION] - Allow if the CALLER is also a protected process. >>>
-        if (targetProc == currentProc || IsProtectedProcessByPid(callerPid)) {
-            // This is either a self-operation or an operation from another trusted process. Allow it.
-            return OB_PREOP_SUCCESS;
-        }
-
-        // Handle CREATE operations from untrusted callers
+        // Handle CREATE operations
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
@@ -287,7 +291,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
             }
         }
 
-        // Handle DUPLICATE operations from untrusted callers
+        // Handle DUPLICATE operations
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
