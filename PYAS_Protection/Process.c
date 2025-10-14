@@ -249,7 +249,14 @@ OB_PREOP_CALLBACK_STATUS preCall(
         // If the caller requests dangerous permissions for our protected target, block the operation.
         if ((DesiredAccess & PROCESS_DANGEROUS_MASK) && AttackType) {
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
-            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED; // Block the operation
+
+            // Block access by stripping dangerous rights
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+            }
+            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+            }
         }
     }
 
@@ -300,7 +307,13 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         // If the caller requests dangerous permissions for the thread, block the operation.
         if ((DesiredAccess & THREAD_DANGEROUS_MASK) && AttackType) {
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
-            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED; // Block the operation
+
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            }
+            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            }
         }
     }
 
