@@ -58,8 +58,6 @@ typedef struct _OBJECT_TYPE_TEMP
     struct _LIST_ENTRY CallbackList;
 }OBJECT_TYPE_TEMP, * POBJECT_TYPE_TEMP;
 
-VOID EnableObType(POBJECT_TYPE ObjectType);
-UNICODE_STRING  GetFilePathByFileObject(PVOID FileObject);
 OB_PREOP_CALLBACK_STATUS PreCallBack(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation);
 NTSTATUS ProtectFileByObRegisterCallbacks();
 #endif    

@@ -4,65 +4,6 @@
 #include "Driver_Process.h"
 
 //
-// --- Globals for PID Tracking ---
-//
-
-// Structure for our linked list entries
-typedef struct _PROTECTED_PID_ENTRY {
-    LIST_ENTRY ListEntry;
-    HANDLE ProcessId;
-} PROTECTED_PID_ENTRY, * PPROTECTED_PID_ENTRY;
-
-LIST_ENTRY g_ProtectedPidsList;
-KSPIN_LOCK g_ProtectedPidsLock;
-PVOID g_ObRegistrationHandle;
-
-#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
-#define PID_LIST_TAG 'diPP' // Pool tag for our PID list allocations
-
-//
-// --- Forward Declarations ---
-//
-
-// Core logic
-BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
-BOOLEAN IsProtectedProcessByPid(HANDLE ProcessId);
-VOID CreateProcessNotifyRoutine(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO CreateInfo);
-OB_PREOP_CALLBACK_STATUS preCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation);
-OB_PREOP_CALLBACK_STATUS threadPreCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation);
-
-// Helpers
-BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
-BOOLEAN IsCallerLauncher(PEPROCESS Proc);
-NTSTATUS QueueProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
-
-// Alerting (Worker thread)
-typedef struct _PROCESS_ALERT_WORK_ITEM {
-    WORK_QUEUE_ITEM WorkItem;
-    UNICODE_STRING TargetPath;
-    UNICODE_STRING AttackerPath;
-    HANDLE TargetPid;
-    HANDLE AttackerPid;
-    WCHAR AttackType[64];
-} PROCESS_ALERT_WORK_ITEM, * PPROCESS_ALERT_WORK_ITEM;
-
-VOID ProcessAlertWorker(PVOID Context);
-
-//
-// --- Safety Masks ---
-//
-#define PROCESS_SAFE_MASK (PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
-#define PROCESS_DANGEROUS_MASK (PROCESS_TERMINATE | PROCESS_CREATE_THREAD | \
-                                PROCESS_SET_SESSIONID | PROCESS_VM_OPERATION | \
-                                PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | \
-                                PROCESS_CREATE_PROCESS | PROCESS_SET_QUOTA | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME | PROCESS_QUERY_INFORMATION | PROCESS_SET_LIMITED_INFORMATION)
-
-#define THREAD_SAFE_MASK (THREAD_QUERY_INFORMATION | SYNCHRONIZE)
-#define THREAD_DANGEROUS_MASK (THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | \
-                               THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | \
-                               THREAD_DIRECT_IMPERSONATION)
-
-//
 // --- Driver Entry and Unload ---
 //
 
@@ -168,11 +109,9 @@ VOID CreateProcessNotifyRoutine(
     _In_ HANDLE ProcessId,
     _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
 ) {
-    // If CreateInfo is not NULL, a process is being created
     if (CreateInfo) {
         // Check if the new process matches our protected paths
         if (IsProtectedProcessByPath(Process)) {
-            // It's a protected process, add its PID to our list
             PPROTECTED_PID_ENTRY pNewEntry = ExAllocatePoolWithTag(
                 NonPagedPool, sizeof(PROTECTED_PID_ENTRY), PID_LIST_TAG
             );
@@ -185,7 +124,15 @@ VOID CreateProcessNotifyRoutine(
                 InsertTailList(&g_ProtectedPidsList, &pNewEntry->ListEntry);
                 KeReleaseInStackQueuedSpinLock(&lockHandle);
 
-                DbgPrint("[Process-Protection] Protected process started: PID %llu\r\n", (unsigned long long)(ULONG_PTR)ProcessId);
+                DbgPrint("[Process-Protection] Protected process started: PID %llu\r\n",
+                    (unsigned long long)(ULONG_PTR)ProcessId);
+            }
+
+            // NEW: Also check if the PARENT process is our launcher and should be protected
+            HANDLE parentPid = PsGetProcessId(PsGetCurrentProcess());
+            if (IsProtectedProcessByPid(parentPid)) {
+                DbgPrint("[Process-Protection] Parent process %llu is also protected\r\n",
+                    (unsigned long long)(ULONG_PTR)parentPid);
             }
         }
     }
@@ -220,6 +167,13 @@ OB_PREOP_CALLBACK_STATUS preCall(
     // Identify the process INITIATING the action (the caller).
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
+    PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
+    HANDLE targetPid = PsGetProcessId(targetProc);
+
+    // CRITICAL FIX: If caller and target are the same process, allow everything
+    if (callerPid == targetPid) {
+        return OB_PREOP_SUCCESS;
+    }
 
     // If the caller is one of our protected processes, trust it completely and allow everything.
     if (IsProtectedProcessByPid(callerPid)) {
@@ -227,9 +181,6 @@ OB_PREOP_CALLBACK_STATUS preCall(
     }
 
     // --- If the caller is NOT protected, we check the target ---
-
-    PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
-    HANDLE targetPid = PsGetProcessId(targetProc);
 
     // Check if the target is a process we are protecting.
     if (IsProtectedProcessByPid(targetPid)) {
@@ -263,7 +214,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
     return OB_PREOP_SUCCESS; // Allow all other operations
 }
 
-
+// CALLBACK: Intercepts thread handle operations.
 // CALLBACK: Intercepts thread handle operations.
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
@@ -275,13 +226,6 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
 
-    // If the caller is one of our protected processes, trust it completely and allow everything.
-    if (IsProtectedProcessByPid(callerPid)) {
-        return OB_PREOP_SUCCESS;
-    }
-
-    // --- If the caller is NOT protected, we check the target's parent process ---
-
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
     PEPROCESS targetProc = PsGetThreadProcess(targetThread);
 
@@ -289,8 +233,22 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
+    HANDLE targetPid = PsGetProcessId(targetProc);
+
+    // CRITICAL FIX: If caller and target are the same process, allow everything
+    if (callerPid == targetPid) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    // If the caller is one of our protected processes, trust it completely and allow everything.
+    if (IsProtectedProcessByPid(callerPid)) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    // --- If the caller is NOT protected, we check the target's parent process ---
+
     // Check if the thread belongs to a process we are protecting.
-    if (IsProtectedProcessByPid(PsGetProcessId(targetProc))) {
+    if (IsProtectedProcessByPid(targetPid)) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
 
