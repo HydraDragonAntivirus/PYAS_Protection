@@ -219,32 +219,33 @@ OB_PREOP_CALLBACK_STATUS preCall(
 
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
-    PEPROCESS currentProc = PsGetCurrentProcess();
 
-    // Check if the target PID is in our protected list
+    // Check if the target is a process we are protecting
     if (IsProtectedProcessByPid(targetPid)) {
-        // Allow the process to manage itself
-        if (targetProc == currentProc) {
+        PEPROCESS currentProc = PsGetCurrentProcess();
+        HANDLE callerPid = PsGetProcessId(currentProc);
+
+        // <<< [MODIFICATION] - Allow if the CALLER is also a protected process. >>>
+        if (targetProc == currentProc || IsProtectedProcessByPid(callerPid)) {
+            // This is either a self-operation or an operation from another trusted process. Allow it.
             return OB_PREOP_SUCCESS;
         }
 
-        // Handle CREATE operations
+        // Handle CREATE operations from untrusted callers
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
                 QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_KILL_ATTEMPT");
-                // Strip dangerous permissions
-                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK; // Strip dangerous permissions
             }
         }
 
-        // Handle DUPLICATE operations
+        // Handle DUPLICATE operations from untrusted callers
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
                 QueueProcessAlertToUserMode(targetProc, currentProc, L"HANDLE_HIJACK_ATTEMPT");
-                // Strip dangerous permissions
-                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK; // Strip dangerous permissions
             }
         }
     }
@@ -261,7 +262,6 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
     PEPROCESS targetProc = PsGetThreadProcess(targetThread);
-    PEPROCESS currentProc = PsGetCurrentProcess();
 
     if (!targetProc) {
         return OB_PREOP_SUCCESS;
@@ -269,13 +269,16 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     // Check if the thread's parent process is protected
     if (IsProtectedProcessByPid(PsGetProcessId(targetProc))) {
+        PEPROCESS currentProc = PsGetCurrentProcess();
+        HANDLE callerPid = PsGetProcessId(currentProc);
 
-        // Allow self-management
-        if (targetProc == currentProc || IsCallerLauncher(currentProc)) {
+        // <<< [MODIFICATION] - Allow if the CALLER is also a protected process. >>>
+        if (targetProc == currentProc || IsProtectedProcessByPid(callerPid)) {
+            // This is either a self-operation or an operation from another trusted process. Allow it.
             return OB_PREOP_SUCCESS;
         }
 
-        // Handle CREATE operations
+        // Handle CREATE operations from untrusted callers
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
@@ -284,7 +287,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
             }
         }
 
-        // Handle DUPLICATE operations
+        // Handle DUPLICATE operations from untrusted callers
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
             ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
             if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
@@ -296,7 +299,6 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     return OB_PREOP_SUCCESS;
 }
-
 
 //
 // --- Helper Functions ---
