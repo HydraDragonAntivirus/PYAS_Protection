@@ -294,71 +294,79 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     if (!targetThread)
         return OB_PREOP_SUCCESS;
 
-    // Get the process that owns this thread (PsGetThreadProcess does NOT return a referenced object)
+    // PsGetThreadProcess does NOT return a referenced object
     targetProc = PsGetThreadProcess(targetThread);
     if (!targetProc)
         return OB_PREOP_SUCCESS;
 
     __try
     {
-        // Only act if the thread belongs to one of our protected processes
-        if (IsProtectedProcessByPath(targetProc))
+        if (!IsProtectedProcessByPath(targetProc))
         {
-            // Allow the protected process to manage its own threads (self-access)
-            if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
-            {
-                goto Done; // safe early exit, no ObDereferenceObject required here
-            }
+            // not one of ours -  nothing to do
+            goto Done;
+        }
 
-            // CREATE operation (handle creation to a thread)
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-            {
-                ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
-                ULONG* pDesired = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-                ULONG before = *pDesired;
+        // Allow self-management (process managing its own threads)
+        if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
+        {
+            goto Done;
+        }
 
-                if (orig & THREAD_DANGEROUS_MASK)
+        // Allow official launcher to manage protected targets (so launcher can suspend/resume its services)
+        if (IsCallerLauncher(currentProc))
+        {
+            goto Done;
+        }
+
+        // If we reach here: protected target + untrusted caller — sanitize requested access
+
+        // CREATE operation (handle creation to a thread)
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        {
+            ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+            ULONG* pDesired = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+            ULONG before = *pDesired;
+
+            if (orig & THREAD_DANGEROUS_MASK)
+            {
+                if (!alertSent)
                 {
-                    // Notify usermode once per event
-                    if (!alertSent)
-                    {
-                        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_SUSPEND");
-                        alertSent = TRUE;
-                    }
+                    QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_SUSPEND");
+                    alertSent = TRUE;
                 }
-
-                // Strip dangerous bits and leave only safe mask bits
-                *pDesired &= ~THREAD_DANGEROUS_MASK;
-                *pDesired &= THREAD_SAFE_MASK;
-
-                DbgPrint("[Thread-Protection] CREATE: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
-                    (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
-                    orig, before, *pDesired);
             }
 
-            // DUPLICATE operation (duplicate handle to a thread)
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+            // Keep only safe bits — remove dangerous ones
+            *pDesired &= THREAD_SAFE_MASK;
+
+            DbgPrint("[Thread-Protection] CREATE: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
+                (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
+                orig, before, *pDesired);
+        }
+
+        // DUPLICATE operation (duplicate handle to a thread)
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+        {
+            ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
+            ULONG* pDesired = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+            ULONG before = *pDesired;
+
+            if (orig & THREAD_DANGEROUS_MASK)
             {
-                ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
-                ULONG* pDesired = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-                ULONG before = *pDesired;
-
-                if (orig & THREAD_DANGEROUS_MASK)
+                if (!alertSent)
                 {
-                    if (!alertSent)
-                    {
-                        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_HIJACK");
-                        alertSent = TRUE;
-                    }
+                    QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_HIJACK");
+                    alertSent = TRUE;
                 }
-
-                *pDesired &= ~THREAD_DANGEROUS_MASK;
-                *pDesired &= THREAD_SAFE_MASK;
-
-                DbgPrint("[Thread-Protection] DUP: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
-                    (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
-                    orig, before, *pDesired);
             }
+
+            // Keep only safe bits — remove dangerous ones
+            *pDesired &= THREAD_SAFE_MASK;
+
+            DbgPrint("[Thread-Protection] DUP: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
+                (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
+                orig, before, *pDesired);
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
