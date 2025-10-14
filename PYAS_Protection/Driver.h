@@ -59,7 +59,7 @@ typedef struct _LDR_DATA_TABLE_ENTRY32
 
 // Core driver entry/unload
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT pDriverObj, _In_ PUNICODE_STRING pRegistryPath);
-NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj);
+//NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj);
 
 // Existing modules
 NTSTATUS ProcessDriverEntry();
@@ -68,7 +68,3 @@ NTSTATUS FileDriverEntry();
 VOID FileUnloadDriver();
 NTSTATUS RegeditDriverEntry();
 NTSTATUS RegeditUnloadDriver();
-
-// Service protection module
-NTSTATUS InitializeServiceProtection();
-VOID CleanupServiceProtection();
