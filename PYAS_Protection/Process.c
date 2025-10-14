@@ -294,32 +294,32 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     if (!targetThread)
         return OB_PREOP_SUCCESS;
 
-    // Get the process that owns this thread
+    // Get the process that owns this thread (PsGetThreadProcess does NOT return a referenced object)
     targetProc = PsGetThreadProcess(targetThread);
     if (!targetProc)
         return OB_PREOP_SUCCESS;
 
     __try
     {
-        // Check if this thread belongs to a protected process
+        // Only act if the thread belongs to one of our protected processes
         if (IsProtectedProcessByPath(targetProc))
         {
-            // Allow the protected process to manage its own threads
+            // Allow the protected process to manage its own threads (self-access)
             if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
             {
-                goto Done; // don't dereference: PsGetThreadProcess does not return a referenced object
+                goto Done; // safe early exit, no ObDereferenceObject required here
             }
 
-            // CREATE operation
+            // CREATE operation (handle creation to a thread)
             if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             {
                 ULONG orig = (ULONG)pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
                 ULONG* pDesired = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
                 ULONG before = *pDesired;
 
-                // If caller requested dangerous bits - queue alert
                 if (orig & THREAD_DANGEROUS_MASK)
                 {
+                    // Notify usermode once per event
                     if (!alertSent)
                     {
                         QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_SUSPEND");
@@ -327,16 +327,16 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
                     }
                 }
 
-                // Remove dangerous bits, but leave safe mask available
+                // Strip dangerous bits and leave only safe mask bits
                 *pDesired &= ~THREAD_DANGEROUS_MASK;
                 *pDesired &= THREAD_SAFE_MASK;
 
-                DbgPrint("[Thread-Protection] CREATE: pid=%llu orig=0x%X before=0x%X after=0x%X\n",
+                DbgPrint("[Thread-Protection] CREATE: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
                     (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
                     orig, before, *pDesired);
             }
 
-            // DUPLICATE operation
+            // DUPLICATE operation (duplicate handle to a thread)
             if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             {
                 ULONG orig = (ULONG)pOperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess;
@@ -355,7 +355,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
                 *pDesired &= ~THREAD_DANGEROUS_MASK;
                 *pDesired &= THREAD_SAFE_MASK;
 
-                DbgPrint("[Thread-Protection] DUP: pid=%llu orig=0x%X before=0x%X after=0x%X\n",
+                DbgPrint("[Thread-Protection] DUP: caller_pid=%llu orig=0x%X before=0x%X after=0x%X\n",
                     (unsigned long long)(ULONG_PTR)PsGetProcessId(currentProc),
                     orig, before, *pDesired);
             }
@@ -363,11 +363,12 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DbgPrint("[Thread-Protection] Exception in threadPreCall: 0x%X\r\n", GetExceptionCode());
+        DbgPrint("[Thread-Protection] Exception in threadPreCall: 0x%X\n", GetExceptionCode());
     }
 
 Done:
-    // PsGetThreadProcess does NOT return a referenced object; do NOT call ObDereferenceObject here.
+    // IMPORTANT: PsGetThreadProcess does NOT return a referenced object.
+    // Do NOT call ObDereferenceObject here.
     return OB_PREOP_SUCCESS;
 }
 
