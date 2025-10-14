@@ -20,6 +20,7 @@ typedef struct _PROCESS_ALERT_WORK_ITEM {
 // Forward declarations
 BOOLEAN IsProtectedProcessByPath(PEPROCESS Process);
 BOOLEAN UnicodeStringContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
+BOOLEAN IsCallerLauncher(PEPROCESS Proc); // forward decl for launcher check
 VOID ProcessAlertWorker(PVOID Context);
 NTSTATUS QueueProcessAlertToUserMode(PEPROCESS TargetProcess, PEPROCESS AttackerProcess, PCWSTR AttackType);
 OB_PREOP_CALLBACK_STATUS threadPreCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation);
@@ -38,6 +39,46 @@ OB_PREOP_CALLBACK_STATUS preCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OP
 #define THREAD_DANGEROUS_MASK (THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | \
                                THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | \
                                THREAD_DIRECT_IMPERSONATION)
+
+// small helper - place this in the same .c file (above threadPreCall) or export from another translation unit.
+// static so it won't create link symbol issues if you include this file in the driver build multiple times.
+static BOOLEAN IsCallerLauncher(PEPROCESS Proc)
+{
+    PUNICODE_STRING pImageName = NULL;
+    NTSTATUS status;
+    BOOLEAN result = FALSE;
+
+    if (!Proc)
+        return FALSE;
+
+    status = SeLocateProcessImageName(Proc, &pImageName);
+    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer)
+    {
+        if (pImageName)
+            ExFreePool(pImageName);
+        return FALSE;
+    }
+
+    // Allowed launcher paths (adjust to your install paths). Use specific substrings.
+    static const PCWSTR launcherPatterns[] = {
+        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
+        L"\\Program Files\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe"
+    };
+
+    for (ULONG i = 0; i < ARRAYSIZE(launcherPatterns); ++i)
+    {
+        if (UnicodeStringContainsInsensitive(pImageName, launcherPatterns[i]))
+        {
+            result = TRUE;
+            break;
+        }
+    }
+
+    // SeLocateProcessImageName allocates the buffer; free it.
+    ExFreePool(pImageName);
+    return result;
+}
+
 
 NTSTATUS ProcessDriverEntry()
 {
@@ -303,7 +344,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     {
         if (!IsProtectedProcessByPath(targetProc))
         {
-            // not one of ours -  nothing to do
+            // not one of ours - nothing to do
             goto Done;
         }
 

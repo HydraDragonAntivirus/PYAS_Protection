@@ -5,7 +5,9 @@
 #define REG_TAG 'gkER'
 #define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OWLYSHIELD"
 #define REG_PROTECT_KEY L"\\Services\\HydraDragonAntivirus"
-#define REG_PROTECT_DIR L"\\Services\\HydraDragonAntivirus"
+#define REG_PROTECT_PYAS L"\\Services\\SimplePYASProtection"
+#define REG_PROTECT_OWLY L"\\Services\\owlyshield_ransom"
+#define REG_PROTECT_SANCTUM L"\\Services\\sanctum_ppl_runner"
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
 
 LARGE_INTEGER Cookie;
@@ -22,7 +24,6 @@ typedef struct _REGISTRY_ALERT_WORK_ITEM {
 // Prototypes
 NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_ PVOID Argument2);
 BOOLEAN GetNameForRegistryObject(_Out_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject);
-BOOLEAN UnicodeContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern);
 VOID RegistryAlertWorker(PVOID Context);
 NTSTATUS QueueRegistryAlertToUserMode(PUNICODE_STRING RegPath, PCWSTR Operation);
 
@@ -366,7 +367,9 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM))
                     {
                         // Queue alert (non-blocking)
                         QueueRegistryAlertToUserMode(&RegPath, L"DELETE_VALUE");
@@ -384,9 +387,10 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
             {
                 if (GetNameForRegistryObject(&RegPath, pInfo->Object))
                 {
-                    if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY))
+                    if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM))
                     {
                         QueueRegistryAlertToUserMode(&RegPath, L"DELETE_KEY");
                         Status = STATUS_ACCESS_DENIED;
@@ -411,7 +415,7 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS))
                     {
                         QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE");
                         Status = STATUS_ACCESS_DENIED;
@@ -436,7 +440,7 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_DIR))
+                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS))
                     {
                         QueueRegistryAlertToUserMode(&RegPath, L"RENAME_KEY");
                         Status = STATUS_ACCESS_DENIED;
