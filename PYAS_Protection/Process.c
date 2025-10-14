@@ -217,43 +217,45 @@ OB_PREOP_CALLBACK_STATUS preCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // First, identify the process INITIATING the action (the caller).
+    // Identify the process INITIATING the action (the caller).
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
 
-    // If the caller is one of our protected processes, trust it completely.
+    // If the caller is one of our protected processes, trust it completely and allow everything.
     if (IsProtectedProcessByPid(callerPid)) {
-        return OB_PREOP_SUCCESS; // Allow the operation immediately.
+        return OB_PREOP_SUCCESS;
     }
 
-    // --- If the caller is NOT protected, we proceed to check the target ---
+    // --- If the caller is NOT protected, we check the target ---
 
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // Check if the target is a process we are protecting from an untrusted caller.
+    // Check if the target is a process we are protecting.
     if (IsProtectedProcessByPid(targetPid)) {
-        // Handle CREATE operations
+        ACCESS_MASK DesiredAccess = 0;
+        PCWSTR AttackType = NULL;
+
+        // Extract the desired access mask based on the operation type.
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
-                QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_KILL_ATTEMPT");
-                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK; // Strip dangerous permissions
-            }
+            DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+            AttackType = L"PROCESS_OPEN_BLOCKED";
+        }
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+            DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+            AttackType = L"PROCESS_DUPLICATE_BLOCKED";
         }
 
-        // Handle DUPLICATE operations
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-            ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            if (*pDesiredAccess & PROCESS_DANGEROUS_MASK) {
-                QueueProcessAlertToUserMode(targetProc, currentProc, L"HANDLE_HIJACK_ATTEMPT");
-                *pDesiredAccess &= ~PROCESS_DANGEROUS_MASK; // Strip dangerous permissions
-            }
+        // If the caller requests dangerous permissions for our protected target, block the operation.
+        if ((DesiredAccess & PROCESS_DANGEROUS_MASK) && AttackType) {
+            QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
+            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED; // Block the operation
         }
     }
 
-    return OB_PREOP_SUCCESS;
+    return OB_PREOP_SUCCESS; // Allow all other operations
 }
+
 
 // CALLBACK: Intercepts thread handle operations.
 OB_PREOP_CALLBACK_STATUS threadPreCall(
@@ -262,16 +264,16 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // First, identify the process INITIATING the action (the caller).
+    // Identify the process INITIATING the action (the caller).
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
 
-    // If the caller is one of our protected processes, trust it completely.
+    // If the caller is one of our protected processes, trust it completely and allow everything.
     if (IsProtectedProcessByPid(callerPid)) {
-        return OB_PREOP_SUCCESS; // Allow the operation immediately.
+        return OB_PREOP_SUCCESS;
     }
 
-    // --- If the caller is NOT protected, we proceed to check the target ---
+    // --- If the caller is NOT protected, we check the target's parent process ---
 
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
     PEPROCESS targetProc = PsGetThreadProcess(targetThread);
@@ -280,28 +282,29 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Check if the thread's parent process is being protected from an untrusted caller.
+    // Check if the thread belongs to a process we are protecting.
     if (IsProtectedProcessByPid(PsGetProcessId(targetProc))) {
-        // Handle CREATE operations
+        ACCESS_MASK DesiredAccess = 0;
+        PCWSTR AttackType = NULL;
+
+        // Extract the desired access mask based on the operation type.
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
-                QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_HIJACK_ATTEMPT");
-                *pDesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
+            DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+            AttackType = L"THREAD_OPEN_BLOCKED";
+        }
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+            DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+            AttackType = L"THREAD_DUPLICATE_BLOCKED";
         }
 
-        // Handle DUPLICATE operations
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-            ACCESS_MASK* pDesiredAccess = &pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            if (*pDesiredAccess & THREAD_DANGEROUS_MASK) {
-                QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_DUP_HIJACK_ATTEMPT");
-                *pDesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
+        // If the caller requests dangerous permissions for the thread, block the operation.
+        if ((DesiredAccess & THREAD_DANGEROUS_MASK) && AttackType) {
+            QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
+            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED; // Block the operation
         }
     }
 
-    return OB_PREOP_SUCCESS;
+    return OB_PREOP_SUCCESS; // Allow all other operations
 }
 
 //
