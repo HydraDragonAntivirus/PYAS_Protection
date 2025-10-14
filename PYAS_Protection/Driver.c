@@ -57,7 +57,7 @@ NTSTATUS DriverEntry(
 	UNREFERENCED_PARAMETER(pRegistryString);
 
 	BypassCheckSign(pDriverObj);
-	pDriverObj->DriverUnload = DriverUnload;
+	//pDriverObj->DriverUnload = DriverUnload;
 
 #if _WIN64
 	PLDR_DATA_TABLE_ENTRY64 ldr = (PLDR_DATA_TABLE_ENTRY64)pDriverObj->DriverSection;
@@ -76,14 +76,14 @@ NTSTATUS DriverEntry(
 }
 
 // DriverUnload
-NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj)
-{
-	UNREFERENCED_PARAMETER(pDriverObj);
-
-	// Cleanup other modules
-	ProcessDriverUnload();
-	FileUnloadDriver();
-	RegeditUnloadDriver();
-
-	return STATUS_SUCCESS;
-}
+//NTSTATUS DriverUnload(_In_ PDRIVER_OBJECT pDriverObj)
+//{
+//	UNREFERENCED_PARAMETER(pDriverObj);
+//
+//	// Cleanup other modules
+//	ProcessDriverUnload();
+//	FileUnloadDriver();
+//	RegeditUnloadDriver();
+//
+//	return STATUS_SUCCESS;
+//}
