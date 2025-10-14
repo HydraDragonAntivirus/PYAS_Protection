@@ -33,9 +33,7 @@ OB_PREOP_CALLBACK_STATUS preCall(_In_ PVOID RegistrationContext, _In_ POB_PRE_OP
 #define PROCESS_DANGEROUS_MASK (PROCESS_TERMINATE | PROCESS_CREATE_THREAD | \
                                 PROCESS_SET_SESSIONID | PROCESS_VM_OPERATION | \
                                 PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | \
-                                PROCESS_CREATE_PROCESS | PROCESS_SET_QUOTA | \
-                                PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME | \
-                                PROCESS_QUERY_INFORMATION | PROCESS_SET_LIMITED_INFORMATION)
+                                PROCESS_CREATE_PROCESS | PROCESS_SET_QUOTA | PROCESS_SET_INFORMATION | PROCESS_SUSPEND_RESUME | PROCESS_QUERY_INFORMATION | PROCESS_SET_LIMITED_INFORMATION)
 
 #define THREAD_SAFE_MASK (THREAD_QUERY_INFORMATION | SYNCHRONIZE)
 #define THREAD_DANGEROUS_MASK (THREAD_TERMINATE | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT | \
@@ -310,7 +308,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
             // Allow the protected process to manage its own threads
             if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
             {
-                goto Done;
+                goto Done; // don't dereference: PsGetThreadProcess does not return a referenced object
             }
 
             // CREATE operation
@@ -370,7 +368,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     }
 
 Done:
-    ObDereferenceObject(targetProc);
+    // PsGetThreadProcess does NOT return a referenced object; do NOT call ObDereferenceObject here.
     return OB_PREOP_SUCCESS;
 }
 
@@ -400,8 +398,8 @@ OB_PREOP_CALLBACK_STATUS preCall(
             // Allow the protected process to manage itself
             if (targetProc == currentProc || PsGetProcessId(targetProc) == PsGetProcessId(currentProc))
             {
-                ObDereferenceObject(targetProc);
-                return OB_PREOP_SUCCESS;
+                // Jump to cleanup so we only dereference targetProc once (PsLookupProcessByProcessId returned a referenced object)
+                goto Cleanup;
             }
 
             // CREATE operation
@@ -462,7 +460,9 @@ OB_PREOP_CALLBACK_STATUS preCall(
         DbgPrint("[Process-Protection] Exception in preCall: 0x%X\r\n", GetExceptionCode());
     }
 
-    ObDereferenceObject(targetProc);
+Cleanup:
+    if (targetProc)
+        ObDereferenceObject(targetProc);
     return OB_PREOP_SUCCESS;
 }
 
