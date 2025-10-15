@@ -166,7 +166,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // Kernel handle ise işlemi geç
+    // If it's a kernel handle, skip
     if (pOperationInformation->KernelHandle)
         return OB_PREOP_SUCCESS;
 
@@ -175,18 +175,18 @@ OB_PREOP_CALLBACK_STATUS preCall(
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // Kendine erişim her zaman izinli
+    // Always allow self-access
     if (callerPid == targetPid)
         return OB_PREOP_SUCCESS;
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Eğer hedef korunmuyor, normal işlemi bırak
+    // If the target is not protected, leave normal processing
     if (!targetIsProtected)
         return OB_PREOP_SUCCESS;
 
-    // Caller da korunuyorsa full access ver
+    // If caller is also protected, grant full access
     if (callerIsProtected)
     {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
@@ -197,7 +197,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller korunmuyor, target korunuyor → tehlikeli bitleri temizle
+    // Caller not protected, target protected -> clear dangerous bits
     ACCESS_MASK DesiredAccess = 0;
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
         DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
@@ -206,7 +206,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
 
     if (DesiredAccess & PROCESS_DANGEROUS_MASK)
     {
-        // Alert usermode
+        // Alert user-mode
         QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
 
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
@@ -215,7 +215,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
     }
 
-    // Restore 0x1041 durumları için tam hak
+    // Restore full rights for 0x1041 cases
     int code = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
     if (code == 0x1041)
         pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL | PROCESS_ALL_ACCESS;
@@ -254,7 +254,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     if (!targetIsProtected)
         return OB_PREOP_SUCCESS;
 
-    // Caller da korunuyorsa full thread access ver
+    // If caller is protected, grant full thread access
     if (callerIsProtected)
     {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
@@ -265,7 +265,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller korunmuyor, target korunuyor → tehlikeli bitleri temizle
+    // Caller not protected, target protected -> clear dangerous thread bits
     ACCESS_MASK DesiredAccess = 0;
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
         DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
