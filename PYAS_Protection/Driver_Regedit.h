@@ -33,7 +33,8 @@ NTSTATUS RegistryCallback(
 */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 BOOLEAN GetNameForRegistryObject(
-    _Inout_ PUNICODE_STRING pRegistryPath,
+    _Inout_ _At_(pRegistryPath->Buffer, _Pre_writable_byte_size_(pRegistryPath->MaximumLength) _Post_z_)
+    PUNICODE_STRING pRegistryPath,
     _In_  PVOID pRegistryObject
 );
 
@@ -41,4 +42,3 @@ BOOLEAN UnicodeContainsInsensitive(
     _In_ PUNICODE_STRING Source,
     _In_ PCWSTR Pattern
 );
-

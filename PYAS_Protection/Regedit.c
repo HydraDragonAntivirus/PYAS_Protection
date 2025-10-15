@@ -23,9 +23,17 @@ typedef struct _REGISTRY_ALERT_WORK_ITEM {
 
 // Prototypes
 NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_ PVOID Argument2);
-BOOLEAN GetNameForRegistryObject(_Inout_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject);
 VOID RegistryAlertWorker(PVOID Context);
 NTSTATUS QueueRegistryAlertToUserMode(PUNICODE_STRING RegPath, PCWSTR Operation);
+
+// NOTE: Function definitions now have SAL annotations matching the header file.
+_IRQL_requires_max_(PASSIVE_LEVEL)
+BOOLEAN GetNameForRegistryObject(
+    _Inout_ _At_(pRegistryPath->Buffer, _Pre_writable_byte_size_(pRegistryPath->MaximumLength) _Post_z_)
+    PUNICODE_STRING pRegistryPath,
+    _In_  PVOID pRegistryObject
+);
+
 BOOLEAN UnicodeContainsInsensitive(_In_ PUNICODE_STRING Source, _In_ PCWSTR Pattern);
 
 
@@ -123,7 +131,6 @@ VOID RegistryAlertWorker(PVOID Context)
 
     // Build JSON message
     RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
-    // FIXED: Changed format specifier for PID from %lld to %llu for architecture safety.
     status = RtlStringCbPrintfW(
         messageBuffer,
         sizeof(messageBuffer),
@@ -159,8 +166,8 @@ VOID RegistryAlertWorker(PVOID Context)
 
     if (NT_SUCCESS(status))
     {
-        // FIXED: Changed format specifier for PID from %lld to %llu for architecture safety.
-        DbgPrint("[Registry-Protection] Alert sent: PID %llu attempted %s on %wZ\r\n",
+        // FIXED: Changed format specifier for Operation from %s to %ws to correctly print a wide character string.
+        DbgPrint("[Registry-Protection] Alert sent: PID %llu attempted %ws on %wZ\r\n",
             (ULONGLONG)(ULONG_PTR)workItem->AttackerPid,
             workItem->Operation,
             &workItem->RegPath);
@@ -251,12 +258,19 @@ NTSTATUS QueueRegistryAlertToUserMode(
     return STATUS_SUCCESS;
 }
 
-// Caller must allocate pRegistryPath->Buffer and set pRegistryPath->MaximumLength
-// FIXED: Added SAL annotations to match the header file and fix inconsistency warnings.
-BOOLEAN GetNameForRegistryObject(_Inout_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject)
+// FIXED: Added full SAL annotations to the function DEFINITION to match the DECLARATION in the header file.
+// This resolves the "inconsistent annotation" and "uninitialized memory" warnings.
+_IRQL_requires_max_(PASSIVE_LEVEL)
+BOOLEAN GetNameForRegistryObject(
+    _Inout_ _At_(pRegistryPath->Buffer, _Pre_writable_byte_size_(pRegistryPath->MaximumLength) _Post_z_)
+    PUNICODE_STRING pRegistryPath,
+    _In_  PVOID pRegistryObject)
 {
     if (!pRegistryPath || pRegistryPath->MaximumLength == 0 || !pRegistryPath->Buffer)
         return FALSE;
+
+    // Explicitly initialize the Length to 0 to satisfy the static analyzer that we are not reading uninitialized memory.
+    pRegistryPath->Length = 0;
 
     if (!pRegistryObject || !MmIsAddressValid(pRegistryObject))
         return FALSE;
@@ -298,7 +312,6 @@ BOOLEAN GetNameForRegistryObject(_Inout_ PUNICODE_STRING pRegistryPath, _In_ PVO
 }
 
 // Case-insensitive substring search: returns TRUE if Pattern exists in Source
-// FIXED: Added SAL annotations to match the header file and fix inconsistency warnings.
 BOOLEAN UnicodeContainsInsensitive(_In_ PUNICODE_STRING Source, _In_ PCWSTR Pattern)
 {
     if (!Source || !Source->Buffer || Source->Length == 0 || !Pattern)
@@ -350,6 +363,8 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
     RegPath.Buffer = (PWCH)ExAllocatePoolWithTag(NonPagedPool, RegPath.MaximumLength, REG_TAG);
     if (!RegPath.Buffer)
         return Status;
+
+    // Length is already 0 from RtlZeroMemory, but being explicit does no harm.
     RegPath.Length = 0;
 
     REG_NOTIFY_CLASS NotifyClass = (REG_NOTIFY_CLASS)(ULONG_PTR)Argument1;
