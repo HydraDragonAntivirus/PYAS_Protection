@@ -23,9 +23,11 @@ typedef struct _REGISTRY_ALERT_WORK_ITEM {
 
 // Prototypes
 NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_ PVOID Argument2);
-BOOLEAN GetNameForRegistryObject(_Out_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject);
+BOOLEAN GetNameForRegistryObject(_Inout_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject);
 VOID RegistryAlertWorker(PVOID Context);
 NTSTATUS QueueRegistryAlertToUserMode(PUNICODE_STRING RegPath, PCWSTR Operation);
+BOOLEAN UnicodeContainsInsensitive(_In_ PUNICODE_STRING Source, _In_ PCWSTR Pattern);
+
 
 NTSTATUS RegeditDriverEntry()
 {
@@ -121,13 +123,14 @@ VOID RegistryAlertWorker(PVOID Context)
 
     // Build JSON message
     RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
+    // FIXED: Changed format specifier for PID from %lld to %llu for architecture safety.
     status = RtlStringCbPrintfW(
         messageBuffer,
         sizeof(messageBuffer),
-        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"REGISTRY_TAMPERING\",\"operation\":\"%s\"}",
+        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%llu,\"attack_type\":\"REGISTRY_TAMPERING\",\"operation\":\"%s\"}",
         escapedRegPath[0] ? escapedRegPath : L"",
         attackerName,
-        (LONGLONG)(ULONG_PTR)workItem->AttackerPid,
+        (ULONGLONG)(ULONG_PTR)workItem->AttackerPid,
         workItem->Operation
     );
 
@@ -156,8 +159,9 @@ VOID RegistryAlertWorker(PVOID Context)
 
     if (NT_SUCCESS(status))
     {
-        DbgPrint("[Registry-Protection] Alert sent: PID %lld attempted %s on %wZ\r\n",
-            (LONGLONG)(ULONG_PTR)workItem->AttackerPid,
+        // FIXED: Changed format specifier for PID from %lld to %llu for architecture safety.
+        DbgPrint("[Registry-Protection] Alert sent: PID %llu attempted %s on %wZ\r\n",
+            (ULONGLONG)(ULONG_PTR)workItem->AttackerPid,
             workItem->Operation,
             &workItem->RegPath);
     }
@@ -248,7 +252,8 @@ NTSTATUS QueueRegistryAlertToUserMode(
 }
 
 // Caller must allocate pRegistryPath->Buffer and set pRegistryPath->MaximumLength
-BOOLEAN GetNameForRegistryObject(_Out_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject)
+// FIXED: Added SAL annotations to match the header file and fix inconsistency warnings.
+BOOLEAN GetNameForRegistryObject(_Inout_ PUNICODE_STRING pRegistryPath, _In_ PVOID pRegistryObject)
 {
     if (!pRegistryPath || pRegistryPath->MaximumLength == 0 || !pRegistryPath->Buffer)
         return FALSE;
@@ -293,7 +298,8 @@ BOOLEAN GetNameForRegistryObject(_Out_ PUNICODE_STRING pRegistryPath, _In_ PVOID
 }
 
 // Case-insensitive substring search: returns TRUE if Pattern exists in Source
-BOOLEAN UnicodeContainsInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
+// FIXED: Added SAL annotations to match the header file and fix inconsistency warnings.
+BOOLEAN UnicodeContainsInsensitive(_In_ PUNICODE_STRING Source, _In_ PCWSTR Pattern)
 {
     if (!Source || !Source->Buffer || Source->Length == 0 || !Pattern)
         return FALSE;
