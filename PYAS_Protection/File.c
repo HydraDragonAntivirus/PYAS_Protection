@@ -92,6 +92,20 @@ VOID FileUnloadDriver()
 //================================================================================
 
 /**
+ * @brief Manually enables callbacks on an object type.
+ *
+ * This is an undocumented technique to set the 'SupportsObjectCallbacks' flag
+ * on an object type structure, which is necessary for file objects on some
+ * Windows versions.
+ */
+VOID EnableObType(POBJECT_TYPE ObjectType)
+{
+    POBJECT_TYPE_TEMP ObjectTypeTemp = (POBJECT_TYPE_TEMP)ObjectType;
+    ObjectTypeTemp->TypeInfo.SupportsObjectCallbacks = 1;
+}
+
+
+/**
  * @brief Registers the object manager callbacks for file objects.
  *
  * Sets up the driver to receive notifications for handle creation/duplication on files.
@@ -101,6 +115,9 @@ NTSTATUS ProtectFileByObRegisterCallbacks()
     OB_CALLBACK_REGISTRATION callBackReg;
     OB_OPERATION_REGISTRATION operationReg;
     NTSTATUS status;
+
+    // Manually enable callbacks for the File Object type. This is crucial.
+    EnableObType(*IoFileObjectType);
 
     RtlZeroMemory(&callBackReg, sizeof(callBackReg));
     RtlZeroMemory(&operationReg, sizeof(operationReg));
@@ -167,12 +184,9 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         }
 
         // --- UNIFIED LIST OF PROTECTED FILES ---
-        // This combines the files from both of your original code snippets.
         static const PCWSTR protectedPatterns[] = {
-            // From the shorter, working code
-            L"HydraDragonAntvirusLauncher.exe",
-            L"sanctum.sys",
-            // From the more detailed File.c
+            // Specific file paths
+            L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
             L"\\Owlyshield Service\\owlyshield_ransom.exe",
             L"\\Owlyshield Service\\tensorflowlite_c.dll",
             L"\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
@@ -181,6 +195,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
             L"\\sanctum\\um_engine.exe",
             L"\\sanctum\\elam_installer.exe",
             L"\\AppData\\Roaming\\Sanctum\\sanctum.dll",
+            L"\\AppData\\Roaming\\Sanctum\\sanctum.sys",
             L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe"
         };
 
