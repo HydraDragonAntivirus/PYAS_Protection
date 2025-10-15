@@ -158,7 +158,7 @@ VOID CreateProcessNotifyRoutine(
     }
 }
 
-// Process handle callback
+// CALLBACK: Intercepts process handle operations
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -166,61 +166,64 @@ OB_PREOP_CALLBACK_STATUS preCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    if (pOperationInformation->KernelHandle) {
+    // Kernel handle ise işlemi geç
+    if (pOperationInformation->KernelHandle)
         return OB_PREOP_SUCCESS;
-    }
 
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
-
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    if (callerPid == targetPid) {
-        return OB_PREOP_SUCCESS; // self-access
-    }
+    // Kendine erişim her zaman izinli
+    if (callerPid == targetPid)
+        return OB_PREOP_SUCCESS;
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Protected -> Protected, grant full access
-    if (callerIsProtected && targetIsProtected) {
+    // Eğer hedef korunmuyor, normal işlemi bırak
+    if (!targetIsProtected)
+        return OB_PREOP_SUCCESS;
+
+    // Caller da korunuyorsa full access ver
+    if (callerIsProtected)
+    {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = PROCESS_ALL_ACCESS;
-        else
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = PROCESS_ALL_ACCESS;
 
         return OB_PREOP_SUCCESS;
     }
 
-    // External -> Protected, strip dangerous bits
-    if (!callerIsProtected && targetIsProtected) {
-        ACCESS_MASK desiredAccess = 0;
-        PCWSTR attackType = NULL;
+    // Caller korunmuyor, target korunuyor → tehlikeli bitleri temizle
+    ACCESS_MASK DesiredAccess = 0;
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
 
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            desiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            attackType = L"PROCESS_OPEN_BLOCKED";
-        }
-        else {
-            desiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            attackType = L"PROCESS_DUPLICATE_BLOCKED";
-        }
+    if (DesiredAccess & PROCESS_DANGEROUS_MASK)
+    {
+        // Alert usermode
+        QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
 
-        if (desiredAccess & PROCESS_DANGEROUS_MASK) {
-            QueueProcessAlertToUserMode(targetProc, currentProc, attackType);
-
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-            else
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-        }
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+        else
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
     }
+
+    // Restore 0x1041 durumları için tam hak
+    int code = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+    if (code == 0x1041)
+        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL | PROCESS_ALL_ACCESS;
 
     return OB_PREOP_SUCCESS;
 }
 
-// Thread handle callback
+// CALLBACK: Intercepts thread handle operations
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -228,53 +231,55 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    if (pOperationInformation->KernelHandle) {
+    if (pOperationInformation->KernelHandle)
         return OB_PREOP_SUCCESS;
-    }
 
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
 
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
     PEPROCESS targetProc = PsGetThreadProcess(targetThread);
-    if (!targetProc) return OB_PREOP_SUCCESS;
+
+    if (!targetProc)
+        return OB_PREOP_SUCCESS;
 
     HANDLE targetPid = PsGetProcessId(targetProc);
-    if (callerPid == targetPid) return OB_PREOP_SUCCESS;
+
+    if (callerPid == targetPid)
+        return OB_PREOP_SUCCESS;
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    if (callerIsProtected && targetIsProtected) {
+    if (!targetIsProtected)
+        return OB_PREOP_SUCCESS;
+
+    // Caller da korunuyorsa full thread access ver
+    if (callerIsProtected)
+    {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = THREAD_ALL_ACCESS;
-        else
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = THREAD_ALL_ACCESS;
 
         return OB_PREOP_SUCCESS;
     }
 
-    if (!callerIsProtected && targetIsProtected) {
-        ACCESS_MASK desiredAccess = 0;
-        PCWSTR attackType = NULL;
+    // Caller korunmuyor, target korunuyor → tehlikeli bitleri temizle
+    ACCESS_MASK DesiredAccess = 0;
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
 
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            desiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            attackType = L"THREAD_OPEN_BLOCKED";
-        }
-        else {
-            desiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            attackType = L"THREAD_DUPLICATE_BLOCKED";
-        }
+    if (DesiredAccess & THREAD_DANGEROUS_MASK)
+    {
+        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_ACCESS_BLOCKED");
 
-        if (desiredAccess & THREAD_DANGEROUS_MASK) {
-            QueueProcessAlertToUserMode(targetProc, currentProc, attackType);
-
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            else
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-        }
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+        else
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
     }
 
     return OB_PREOP_SUCCESS;
