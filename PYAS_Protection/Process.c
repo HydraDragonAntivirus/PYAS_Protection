@@ -70,7 +70,7 @@ NTSTATUS ProtectProcess(void)
     RtlZeroMemory(g_OpReg, sizeof(OB_OPERATION_REGISTRATION) * 2);
 
     g_ObReg = (POB_CALLBACK_REGISTRATION)ExAllocatePoolWithTag(
-        NonPagedPoolNx, sizeof(OB_CALLBACK_REGISTRATION), 'gObR')
+        NonPagedPoolNx, sizeof(OB_CALLBACK_REGISTRATION), 'gObR');
     if (!g_ObReg) { ExFreePoolWithTag(g_OpReg, 'gOpR'); g_OpReg = NULL; return STATUS_INSUFFICIENT_RESOURCES; }
     RtlZeroMemory(g_ObReg, sizeof(OB_CALLBACK_REGISTRATION));
 
