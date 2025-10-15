@@ -206,14 +206,9 @@ OB_PREOP_CALLBACK_STATUS preCall(
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Allow: Protected -> Protected OR Protected -> External
-    if (callerIsProtected) {
-        return OB_PREOP_SUCCESS;
-    }
-
     // **GRANT FULL ACCESS TO HYDRADRAGON AV ONLY**
-    if (targetIsProtected) {
-        DbgPrint("[Process-Protection] Granting HydraDragonAV full access: PID %llu -> protected PID %llu\r\n",
+    if (callerIsProtected && targetIsProtected) {
+        DbgPrint("[Process-Protection] Granting full access because caller is protected (AV): %llu -> %llu\r\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
         // Grant full access
@@ -300,7 +295,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     }
 
     // **GRANT FULL THREAD ACCESS TO HYDRADRAGON AV ONLY**
-    if (targetIsProtected) {
+    if (callerIsProtected && targetIsProtected) {
         DbgPrint("[Process-Protection] Granting HydraDragonAV full thread access: PID %llu -> protected PID %llu\r\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
