@@ -1,11 +1,13 @@
 // File.c - Self-Defense Protection with User-Mode Alerting (FIXED)
-#include "Drvier_File.h"
-#include <ntstrsafe.h>
+#include "Driver_File.h"    // your fixed header
 
 PVOID CallBackHandle = NULL;
 
 // Pipe name for self-defense alerts
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
+
+// Pool tag used for allocations in this file
+#define ALERT_POOL_TAG 'tlrA'  // 'Arlt' reversed as a DWORD constant
 
 // Work item structure for deferred pipe communication
 typedef struct _ALERT_WORK_ITEM {
@@ -16,9 +18,17 @@ typedef struct _ALERT_WORK_ITEM {
     WCHAR AttackType[64];
 } ALERT_WORK_ITEM, * PALERT_WORK_ITEM;
 
+// Forward prototypes (if not in header)
+NTSTATUS QueueAlertToUserMode(
+    PUNICODE_STRING ProtectedFile,
+    PUNICODE_STRING AttackingProcessPath,
+    HANDLE AttackingPid,
+    PCWSTR AttackType
+);
+
+// DriverEntry-like initializer (keeps name from your code)
 NTSTATUS FileDriverEntry()
 {
-    // Register file protection callbacks
     NTSTATUS status = ProtectFileByObRegisterCallbacks();
     if (NT_SUCCESS(status))
     {
@@ -35,6 +45,9 @@ NTSTATUS FileDriverEntry()
 VOID SendAlertWorker(PVOID Context)
 {
     PALERT_WORK_ITEM workItem = (PALERT_WORK_ITEM)Context;
+    if (!workItem)
+        return;
+
     NTSTATUS status;
     HANDLE pipeHandle = NULL;
     IO_STATUS_BLOCK ioStatusBlock;
@@ -43,7 +56,6 @@ VOID SendAlertWorker(PVOID Context)
     WCHAR messageBuffer[2048];
     LARGE_INTEGER timeout;
 
-    // Initialize pipe name
     RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
 
     InitializeObjectAttributes(
@@ -54,13 +66,13 @@ VOID SendAlertWorker(PVOID Context)
         NULL
     );
 
-    // Set timeout to 100ms to avoid blocking
-    timeout.QuadPart = -1000000; // 100ms in 100-nanosecond units (negative = relative)
+    // Relative timeout: 100ms (negative = relative, 100,000 * 10ns units)
+    timeout.QuadPart = -1000000; // 100ms
 
-    // Try to open the pipe (non-blocking)
+    // Try to open the pipe for writing (non-blocking open)
     status = ZwCreateFile(
         &pipeHandle,
-        FILE_WRITE_DATA | SYNCHRONIZE,
+        SYNCHRONIZE | FILE_WRITE_DATA,
         &objAttr,
         &ioStatusBlock,
         NULL,
@@ -74,21 +86,24 @@ VOID SendAlertWorker(PVOID Context)
 
     if (!NT_SUCCESS(status))
     {
-        // Pipe not available - service may not be running yet
+        // pipe not available; just cleanup and exit
         goto Cleanup;
     }
 
-    // Build JSON-like message for user-mode
+    // Build JSON-like message for user-mode safely.
+    // Use %ws for wide strings and include terminating NUL when calculating bytes.
     RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
 
-    PCWSTR protectedName = workItem->ProtectedFile.Buffer ? workItem->ProtectedFile.Buffer : L"Unknown";
-    PCWSTR attackerPath = workItem->AttackingProcessPath.Buffer ? workItem->AttackingProcessPath.Buffer : L"Unknown";
+    PCWSTR protectedName = (workItem->ProtectedFile.Buffer && workItem->ProtectedFile.Length > 0) ?
+        workItem->ProtectedFile.Buffer : L"Unknown";
 
-    // Use RtlStringCbPrintfW (byte-based) which is safer
+    PCWSTR attackerPath = (workItem->AttackingProcessPath.Buffer && workItem->AttackingProcessPath.Length > 0) ?
+        workItem->AttackingProcessPath.Buffer : L"Unknown";
+
     status = RtlStringCbPrintfW(
         messageBuffer,
         sizeof(messageBuffer),
-        L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%lld,\"attack_type\":\"%s\"}",
+        L"{\"protected_file\":\"%ws\",\"attacker_path\":\"%ws\",\"attacker_pid\":%lld,\"attack_type\":\"%ws\"}",
         protectedName,
         attackerPath,
         (LONGLONG)(ULONG_PTR)workItem->AttackingPid,
@@ -97,14 +112,14 @@ VOID SendAlertWorker(PVOID Context)
 
     if (!NT_SUCCESS(status))
     {
-        ZwClose(pipeHandle);
+        // formatting failed
         goto Cleanup;
     }
 
-    // Calculate actual string length
-    SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
+    // Include terminating NUL in bytes to make user-mode parsing easier (optional)
+    SIZE_T messageLength = (wcslen(messageBuffer) + 1) * sizeof(WCHAR);
 
-    // Write to pipe with timeout
+    // Write to pipe (synchronous)
     status = ZwWriteFile(
         pipeHandle,
         NULL,
@@ -117,29 +132,35 @@ VOID SendAlertWorker(PVOID Context)
         NULL
     );
 
-    ZwClose(pipeHandle);
-
     if (NT_SUCCESS(status))
     {
-        DbgPrint("[Self-Defense] Alert sent to user-mode: %wZ attacked by PID %lld\r\n",
-            &workItem->ProtectedFile, (LONGLONG)(ULONG_PTR)workItem->AttackingPid);
+        DbgPrint("[Self-Defense] Alert sent to user-mode: %ws attacked by PID %lld\r\n",
+            protectedName, (LONGLONG)(ULONG_PTR)workItem->AttackingPid);
     }
 
 Cleanup:
-    // Free allocated strings
+    if (pipeHandle)
+    {
+        ZwClose(pipeHandle);
+        pipeHandle = NULL;
+    }
+
+    // Free allocated strings and workItem using same tag used for allocation
     if (workItem->ProtectedFile.Buffer)
     {
-        ExFreePool(workItem->ProtectedFile.Buffer);
+        ExFreePoolWithTag(workItem->ProtectedFile.Buffer, ALERT_POOL_TAG);
+        workItem->ProtectedFile.Buffer = NULL;
     }
     if (workItem->AttackingProcessPath.Buffer)
     {
-        ExFreePool(workItem->AttackingProcessPath.Buffer);
+        ExFreePoolWithTag(workItem->AttackingProcessPath.Buffer, ALERT_POOL_TAG);
+        workItem->AttackingProcessPath.Buffer = NULL;
     }
 
-    // Free work item
-    ExFreePoolWithTag(workItem, 'tlrA');
+    ExFreePoolWithTag(workItem, ALERT_POOL_TAG);
 }
 
+// Queue a work item to notify user-mode (safe copies)
 NTSTATUS QueueAlertToUserMode(
     PUNICODE_STRING ProtectedFile,
     PUNICODE_STRING AttackingProcessPath,
@@ -150,11 +171,10 @@ NTSTATUS QueueAlertToUserMode(
     PALERT_WORK_ITEM workItem;
     NTSTATUS status = STATUS_SUCCESS;
 
-    // Allocate work item
     workItem = (PALERT_WORK_ITEM)ExAllocatePoolWithTag(
         NonPagedPool,
         sizeof(ALERT_WORK_ITEM),
-        'tlrA'
+        ALERT_POOL_TAG
     );
 
     if (!workItem)
@@ -164,7 +184,7 @@ NTSTATUS QueueAlertToUserMode(
 
     RtlZeroMemory(workItem, sizeof(ALERT_WORK_ITEM));
 
-    // Copy protected file path
+    // Copy protected file path (safe allocation, include space for NUL)
     if (ProtectedFile && ProtectedFile->Buffer && ProtectedFile->Length > 0)
     {
         workItem->ProtectedFile.Length = ProtectedFile->Length;
@@ -172,13 +192,21 @@ NTSTATUS QueueAlertToUserMode(
         workItem->ProtectedFile.Buffer = (PWCHAR)ExAllocatePoolWithTag(
             NonPagedPool,
             workItem->ProtectedFile.MaximumLength,
-            'tlrA'
+            ALERT_POOL_TAG
         );
 
         if (workItem->ProtectedFile.Buffer)
         {
             RtlCopyMemory(workItem->ProtectedFile.Buffer, ProtectedFile->Buffer, ProtectedFile->Length);
             workItem->ProtectedFile.Buffer[ProtectedFile->Length / sizeof(WCHAR)] = L'\0';
+            // set UNICODE_STRING lengths correctly
+            workItem->ProtectedFile.Length = ProtectedFile->Length;
+        }
+        else
+        {
+            // failed allocation: clean up and return error
+            ExFreePoolWithTag(workItem, ALERT_POOL_TAG);
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
     }
 
@@ -190,19 +218,28 @@ NTSTATUS QueueAlertToUserMode(
         workItem->AttackingProcessPath.Buffer = (PWCHAR)ExAllocatePoolWithTag(
             NonPagedPool,
             workItem->AttackingProcessPath.MaximumLength,
-            'tlrA'
+            ALERT_POOL_TAG
         );
 
         if (workItem->AttackingProcessPath.Buffer)
         {
             RtlCopyMemory(workItem->AttackingProcessPath.Buffer, AttackingProcessPath->Buffer, AttackingProcessPath->Length);
             workItem->AttackingProcessPath.Buffer[AttackingProcessPath->Length / sizeof(WCHAR)] = L'\0';
+            workItem->AttackingProcessPath.Length = AttackingProcessPath->Length;
+        }
+        else
+        {
+            // cleanup
+            if (workItem->ProtectedFile.Buffer)
+                ExFreePoolWithTag(workItem->ProtectedFile.Buffer, ALERT_POOL_TAG);
+            ExFreePoolWithTag(workItem, ALERT_POOL_TAG);
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
     }
 
     // Copy PID and attack type
     workItem->AttackingPid = AttackingPid;
-    RtlStringCbCopyW(workItem->AttackType, sizeof(workItem->AttackType), AttackType);
+    RtlStringCbCopyW(workItem->AttackType, sizeof(workItem->AttackType), AttackType ? AttackType : L"UNKNOWN");
 
     // Initialize and queue work item
     ExInitializeWorkItem(&workItem->WorkItem, SendAlertWorker, workItem);
@@ -217,26 +254,24 @@ NTSTATUS ProtectFileByObRegisterCallbacks()
     OB_OPERATION_REGISTRATION OperationReg;
     NTSTATUS Status;
 
-    // Check if IoFileObjectType supports callbacks
-    // Note: On modern Windows (Win10+), this should be supported by default
-    // Removed dangerous EnableObType() call
+    RtlZeroMemory(&CallBackReg, sizeof(CallBackReg));
+    RtlZeroMemory(&OperationReg, sizeof(OperationReg));
 
-    RtlZeroMemory(&CallBackReg, sizeof(OB_CALLBACK_REGISTRATION));
     CallBackReg.Version = ObGetFilterVersion();
     CallBackReg.OperationRegistrationCount = 1;
     CallBackReg.RegistrationContext = NULL;
-    RtlInitUnicodeString(&CallBackReg.Altitude, L"321000");
 
-    RtlZeroMemory(&OperationReg, sizeof(OB_OPERATION_REGISTRATION));
+    // Altitude must be a UNICODE_STRING. Pick a sensible altitude higher than other drivers you expect.
+    RtlInitUnicodeString(&CallBackReg.Altitude, L"321000"); // tune as needed
 
     OperationReg.ObjectType = IoFileObjectType;
     OperationReg.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-    OperationReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)&PreCallBack;
+    OperationReg.PreOperation = (POB_PRE_OPERATION_CALLBACK)PreCallBack;
+    OperationReg.PostOperation = NULL;
 
     CallBackReg.OperationRegistration = &OperationReg;
 
     Status = ObRegisterCallbacks(&CallBackReg, &CallBackHandle);
-
     if (!NT_SUCCESS(Status))
     {
         DbgPrint("[Self-Defense] ObRegisterCallbacks failed: 0x%X\r\n", Status);
@@ -247,12 +282,15 @@ NTSTATUS ProtectFileByObRegisterCallbacks()
     return STATUS_SUCCESS;
 }
 
+// Simple substring search helper: keep this minimal to avoid risky APIs
 BOOLEAN FilePathContains(PUNICODE_STRING FilePath, PCWSTR Pattern)
 {
     if (!FilePath || !FilePath->Buffer || !Pattern)
         return FALSE;
 
-    // Safe string search
+    // Use wcsstr on the buffer (FilePath is a wide string, not necessarily NUL-terminated in all contexts,
+    // but IoQueryFileDosDeviceName returns a UNICODE_STRING with a NUL terminator in practice).
+    // We validated Length > 0 where applicable before calling this.
     PWCHAR found = wcsstr(FilePath->Buffer, Pattern);
     return (found != NULL);
 }
@@ -271,16 +309,14 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
 
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // Verify object type
+    // Ensure this callback is about file objects
     if (OperationInformation->ObjectType != *IoFileObjectType)
     {
         return OB_PREOP_SUCCESS;
     }
 
-    // Use SEH for safe memory access
     __try
     {
-        // Validate FileObject
         if (!FileObject ||
             !MmIsAddressValid(FileObject) ||
             !FileObject->FileName.Buffer ||
@@ -291,7 +327,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
             return OB_PREOP_SUCCESS;
         }
 
-        // Get file path (this allocates memory)
+        // Query DOS path (allocates memory). If it fails, just exit cleanly.
         NTSTATUS status = IoQueryFileDosDeviceName(FileObject, &fileNameInfo);
         if (!NT_SUCCESS(status) || !fileNameInfo)
         {
@@ -299,19 +335,18 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         }
 
         uniFilePath = fileNameInfo->Name;
-
         if (uniFilePath.Buffer == NULL || uniFilePath.Length == 0)
         {
-            ExFreePool(fileNameInfo);
+            ExFreePoolWithTag(fileNameInfo, ALERT_POOL_TAG);
             return OB_PREOP_SUCCESS;
         }
 
-        // Check for protected HydraDragonAntivirus components
+        // Patterns to protect
         static const PCWSTR protectedPatterns[] = {
             L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
-            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\Owlyshield Service\\owlyshield_ransom.exe",
-            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\Owlyshield Service\\tensorflowlite_c.dll",
-            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
+            L"\\HydraDragonAntivirus\\Owlyshield Service\\owlyshield_ransom.exe",
+            L"\\HydraDragonAntivirus\\Owlyshield Service\\tensorflowlite_c.dll",
+            L"\\HydraDragonAntivirus\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
             L"\\sanctum\\app.exe",
             L"\\sanctum\\server.exe",
             L"\\sanctum\\um_engine.exe",
@@ -321,7 +356,6 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
             L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe"
         };
 
-        // Check if file path contains any protected pattern
         for (ULONG i = 0; i < ARRAYSIZE(protectedPatterns); ++i)
         {
             if (FilePathContains(&uniFilePath, protectedPatterns[i]))
@@ -331,22 +365,25 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
             }
         }
 
-        // If protected file is being accessed with delete/write permissions
+        // If protected file is being opened with delete or write access on this new handle
         if (isProtected && (FileObject->DeleteAccess || FileObject->WriteAccess))
         {
             currentProcess = PsGetCurrentProcess();
 
-            // Get the attacking process path
+            // Locate process image name (allocates memory that must be freed by caller)
             status = SeLocateProcessImageName(currentProcess, &attackerPath);
 
-            // Block the operation
+            // For create/duplicate operations we can strip requested access rights on this incoming handle.
+            // NOTE: this prevents *new* handles from getting delete/write access, but it does NOT revoke
+            // access from already-open handles. For robust prevention of deletion, use a mini-filter to intercept
+            // file disposition IRPs (see comments below).
             if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             {
+                // Strip requested access for the newly-created handle
                 OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
-                DbgPrint("[SELF-DEFENSE] Blocked CREATE access to: %wZ by PID: %lld\r\n",
+                DbgPrint("[SELF-DEFENSE] Stripped CREATE access to: %wZ by PID: %lld\r\n",
                     &uniFilePath, (LONGLONG)(ULONG_PTR)CurrentProcessId);
 
-                // Queue alert to user-mode (runs at PASSIVE_LEVEL)
                 if (NT_SUCCESS(status) && attackerPath)
                 {
                     QueueAlertToUserMode(&uniFilePath, attackerPath, CurrentProcessId, L"FILE_TAMPERING");
@@ -355,28 +392,27 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
             else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
             {
                 OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-                DbgPrint("[SELF-DEFENSE] Blocked DUPLICATE access to: %wZ by PID: %lld\r\n",
+                DbgPrint("[SELF-DEFENSE] Stripped DUPLICATE access to: %wZ by PID: %lld\r\n",
                     &uniFilePath, (LONGLONG)(ULONG_PTR)CurrentProcessId);
 
-                // Queue alert to user-mode
                 if (NT_SUCCESS(status) && attackerPath)
                 {
                     QueueAlertToUserMode(&uniFilePath, attackerPath, CurrentProcessId, L"HANDLE_HIJACK");
                 }
             }
 
-            // Free the allocated path from SeLocateProcessImageName
+            // Free attackerPath from SeLocateProcessImageName
             if (attackerPath)
             {
-                ExFreePool(attackerPath);
+                ExFreePoolWithTag(attackerPath, ALERT_POOL_TAG);
                 attackerPath = NULL;
             }
         }
 
-        // Free the file name info allocated by IoQueryFileDosDeviceName
+        // Free fileNameInfo allocated by IoQueryFileDosDeviceName
         if (fileNameInfo)
         {
-            ExFreePool(fileNameInfo);
+            ExFreePoolWithTag(fileNameInfo, ALERT_POOL_TAG);
             fileNameInfo = NULL;
         }
     }
@@ -384,30 +420,28 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
     {
         DbgPrint("[Self-Defense] Exception in PreCallBack: 0x%X\r\n", GetExceptionCode());
 
-        // Clean up on exception
         if (fileNameInfo)
         {
-            ExFreePool(fileNameInfo);
+            ExFreePoolWithTag(fileNameInfo, ALERT_POOL_TAG);
+            fileNameInfo = NULL;
         }
         if (attackerPath)
         {
-            ExFreePool(attackerPath);
+            ExFreePoolWithTag(attackerPath, ALERT_POOL_TAG);
+            attackerPath = NULL;
         }
     }
 
+    // Per MSDN, pre-op callback should return OB_PREOP_SUCCESS (we altered DesiredAccess above)
     return OB_PREOP_SUCCESS;
 }
 
-// Removed GetFilePathByFileObject - functionality moved into PreCallBack
-
-// REMOVED: EnableObType() - this is dangerous and version-dependent
-// Modern Windows (Win10+) supports file object callbacks by default
-
+// Unregister callbacks and cleanup
 VOID FileUnloadDriver()
 {
     if (CallBackHandle != NULL)
     {
-        ObUnRegisterCallbacks(CallBackHandle);
+        ObUnRegisterCallbacks(CallBackHandle);  // use correct API to unregister
         CallBackHandle = NULL;
     }
 

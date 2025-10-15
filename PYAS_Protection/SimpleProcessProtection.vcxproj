@@ -188,7 +188,7 @@
     <ClInclude Include="Driver.h" />
     <ClInclude Include="Driver_Process.h" />
     <ClInclude Include="Driver_Regedit.h" />
-    <ClInclude Include="Drvier_File.h" />
+    <ClInclude Include="Driver_File.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Driver.c" />

@@ -27,7 +27,7 @@
     <ClInclude Include="Driver_Process.h">
       <Filter>Resource Files\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Drvier_File.h">
+    <ClInclude Include="Driver_File.h">
       <Filter>Resource Files\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Driver_Regedit.h">
