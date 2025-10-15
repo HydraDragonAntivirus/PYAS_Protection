@@ -158,7 +158,7 @@ VOID CreateProcessNotifyRoutine(
     }
 }
 
-// Helper: Check if process is HydraDragonAntivirus (YOUR AV ONLY)
+// Helper: Check if process is HydraDragonAntivirus
 BOOLEAN IsHydraDragonAV(PEPROCESS Process) {
     PUNICODE_STRING pImageName = NULL;
     NTSTATUS status;
@@ -218,7 +218,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
 
     // At this point: targetIsProtected == TRUE
 
-    // 1) If caller is protected as well (e.g., your AV), grant full access
+    // 1) If caller is protected as well (e.g., HydraDragonAntivirus), grant full access
     if (callerIsProtected) {
         DbgPrint("[Process-Protection] Granting PROCESS_ALL_ACCESS: caller %llu -> protected target %llu\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
@@ -307,7 +307,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // 1) If caller is protected as well (your AV), grant full thread access
+    // 1) If caller is protected as well (HydraDragonAntivirus), grant full thread access
     if (callerIsProtected) {
         DbgPrint("[Process-Protection] Granting THREAD_ALL_ACCESS: caller %llu -> protected target %llu\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
