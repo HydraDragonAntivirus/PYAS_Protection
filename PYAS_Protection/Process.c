@@ -182,7 +182,6 @@ BOOLEAN IsHydraDragonAV(PEPROCESS Process) {
     ExFreePool(pImageName);
     return result;
 }
-
 // CALLBACK: Intercepts process handle operations
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
@@ -206,12 +205,24 @@ OB_PREOP_CALLBACK_STATUS preCall(
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // **GRANT FULL ACCESS TO HYDRADRAGON AV ONLY**
-    if (callerIsProtected && targetIsProtected) {
-        DbgPrint("[Process-Protection] Granting full access because caller is protected (AV): %llu -> %llu\r\n",
+    // Debug: show who is calling whom (remove or reduce after debugging)
+    DbgPrint("[Process-Protection] preCall: caller=%llu callerProtected=%d target=%llu targetProtected=%d op=%u\n",
+        (unsigned long long)(ULONG_PTR)callerPid, (int)callerIsProtected,
+        (unsigned long long)(ULONG_PTR)targetPid, (int)targetIsProtected,
+        (unsigned int)pOperationInformation->Operation);
+
+    // If target is not protected, do nothing special
+    if (!targetIsProtected) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    // At this point: targetIsProtected == TRUE
+
+    // 1) If caller is protected as well (e.g., your AV), grant full access
+    if (callerIsProtected) {
+        DbgPrint("[Process-Protection] Granting PROCESS_ALL_ACCESS: caller %llu -> protected target %llu\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
-        // Grant full access
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = PROCESS_ALL_ACCESS;
         }
@@ -222,40 +233,38 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Main protection: External -> Protected (strip dangerous access)
-    if (!callerIsProtected && targetIsProtected) {
-        ACCESS_MASK DesiredAccess = 0;
-        PCWSTR AttackType = NULL;
+    // 2) Caller is NOT protected and target IS protected -> strip dangerous access bits
+    ACCESS_MASK DesiredAccess = 0;
+    PCWSTR AttackType = NULL;
 
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+        AttackType = L"PROCESS_OPEN_BLOCKED";
+    }
+    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+        AttackType = L"PROCESS_DUPLICATE_BLOCKED";
+    }
+
+    if (AttackType && (DesiredAccess & PROCESS_DANGEROUS_MASK)) {
+        DbgPrint("[Process-Protection] Stripping PROCESS_DANGEROUS_MASK from caller %llu -> protected %llu (was 0x%X)\n",
+            (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid, (unsigned int)DesiredAccess);
+
+        // Alert usermode (non-blocking enqueue)
+        QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
+
+        // Strip only the dangerous bits (do not blindly zero unless you want that)
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            AttackType = L"PROCESS_OPEN_BLOCKED";
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
         }
-        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-            DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            AttackType = L"PROCESS_DUPLICATE_BLOCKED";
-        }
-
-        // If the caller requests dangerous permissions, strip them instead of blocking.
-        if ((DesiredAccess & PROCESS_DANGEROUS_MASK) && AttackType) {
-            DbgPrint("[Process-Protection] STRIPPING DANGEROUS ACCESS from PID %llu to protected PID %llu\r\n",
-                (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
-
-            QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
-
-            // Strip dangerous access rights
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-            }
-            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-            }
+        else {
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
         }
     }
 
-    // Always return success for older WDKs; we only modify access rights.
     return OB_PREOP_SUCCESS;
 }
+
 
 // CALLBACK: Intercepts thread handle operations
 OB_PREOP_CALLBACK_STATUS threadPreCall(
@@ -287,19 +296,22 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Protected process accesses others -> grant extra access
-    if (callerIsProtected && !targetIsProtected) {
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess |= PROCESS_ALL_ACCESS;
-        }
+    // Debug: show who is calling whom (remove after debug)
+    DbgPrint("[Process-Protection] threadPreCall: caller=%llu callerProtected=%d target=%llu targetProtected=%d op=%u\n",
+        (unsigned long long)(ULONG_PTR)callerPid, (int)callerIsProtected,
+        (unsigned long long)(ULONG_PTR)targetPid, (int)targetIsProtected,
+        (unsigned int)pOperationInformation->Operation);
+
+    // If target is not protected, do nothing special
+    if (!targetIsProtected) {
+        return OB_PREOP_SUCCESS;
     }
 
-    // **GRANT FULL THREAD ACCESS TO HYDRADRAGON AV ONLY**
-    if (callerIsProtected && targetIsProtected) {
-        DbgPrint("[Process-Protection] Granting HydraDragonAV full thread access: PID %llu -> protected PID %llu\r\n",
+    // 1) If caller is protected as well (your AV), grant full thread access
+    if (callerIsProtected) {
+        DbgPrint("[Process-Protection] Granting THREAD_ALL_ACCESS: caller %llu -> protected target %llu\n",
             (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
-        // Grant full access
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = THREAD_ALL_ACCESS;
         }
@@ -310,37 +322,33 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Main protection: External -> Protected (strip dangerous access)
-    if (!callerIsProtected && targetIsProtected) {
-        ACCESS_MASK DesiredAccess = 0;
-        PCWSTR AttackType = NULL;
+    // 2) Caller is NOT protected and target IS protected -> strip dangerous thread access bits
+    ACCESS_MASK DesiredAccess = 0;
+    PCWSTR AttackType = NULL;
+
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+        AttackType = L"THREAD_OPEN_BLOCKED";
+    }
+    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+        AttackType = L"THREAD_DUPLICATE_BLOCKED";
+    }
+
+    if (AttackType && (DesiredAccess & THREAD_DANGEROUS_MASK)) {
+        DbgPrint("[Process-Protection] Stripping THREAD_DANGEROUS_MASK from caller %llu -> protected %llu (was 0x%X)\n",
+            (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid, (unsigned int)DesiredAccess);
+
+        QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-            DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-            AttackType = L"THREAD_OPEN_BLOCKED";
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
         }
-        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-            DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-            AttackType = L"THREAD_DUPLICATE_BLOCKED";
-        }
-
-        if ((DesiredAccess & THREAD_DANGEROUS_MASK) && AttackType) {
-            DbgPrint("[Process-Protection] STRIPPING DANGEROUS THREAD ACCESS from PID %llu to protected PID %llu\r\n",
-                (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
-
-            QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
-
-            // Strip dangerous access rights
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
-            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
+        else {
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
         }
     }
 
-    // Always return success for older WDKs; we only modify access rights.
     return OB_PREOP_SUCCESS;
 }
 
