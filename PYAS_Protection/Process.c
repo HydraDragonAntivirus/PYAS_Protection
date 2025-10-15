@@ -4,6 +4,14 @@
 #include "Driver_Process.h"
 
 //
+// --- Globals ---
+//
+
+LIST_ENTRY g_ProtectedPidsList;
+KSPIN_LOCK g_ProtectedPidsLock;
+PVOID g_ObRegistrationHandle = NULL;
+
+//
 // --- Driver Entry and Unload ---
 //
 
@@ -26,6 +34,7 @@ NTSTATUS ProcessDriverUnload() {
     }
 
     // Unregister the process creation notification routine
+    // The first parameter should be the same function pointer used for registration.
     PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
 
     // Clean up the protected PID list
@@ -70,7 +79,7 @@ NTSTATUS ProtectProcess() {
     obReg.Version = ObGetFilterVersion();
     obReg.OperationRegistrationCount = 2;
     obReg.RegistrationContext = NULL;
-    RtlInitUnicodeString(&obReg.Altitude, L"321000");
+    RtlInitUnicodeString(&obReg.Altitude, L"321000"); // Example altitude
 
     // Process protection
     opReg[0].ObjectType = PsProcessType;
@@ -109,8 +118,7 @@ VOID CreateProcessNotifyRoutine(
     _In_ HANDLE ProcessId,
     _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
 ) {
-    if (CreateInfo) {
-        // Check if the new process matches our protected paths
+    if (CreateInfo) { // Process is starting
         if (IsProtectedProcessByPath(Process)) {
             PPROTECTED_PID_ENTRY pNewEntry = ExAllocatePoolWithTag(
                 NonPagedPool, sizeof(PROTECTED_PID_ENTRY), PID_LIST_TAG
@@ -127,17 +135,9 @@ VOID CreateProcessNotifyRoutine(
                 DbgPrint("[Process-Protection] Protected process started: PID %llu\r\n",
                     (unsigned long long)(ULONG_PTR)ProcessId);
             }
-
-            // NEW: Also check if the PARENT process is our launcher and should be protected
-            HANDLE parentPid = PsGetProcessId(PsGetCurrentProcess());
-            if (IsProtectedProcessByPid(parentPid)) {
-                DbgPrint("[Process-Protection] Parent process %llu is also protected\r\n",
-                    (unsigned long long)(ULONG_PTR)parentPid);
-            }
         }
     }
-    else {
-        // Process is exiting. Check if it's in our list.
+    else { // Process is exiting
         KLOCK_QUEUE_HANDLE lockHandle;
         KeAcquireInStackQueuedSpinLock(&g_ProtectedPidsLock, &lockHandle);
 
@@ -164,39 +164,33 @@ OB_PREOP_CALLBACK_STATUS preCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // Identify the process INITIATING the action (the caller).
+    // Kernel-mode callers should not be restricted.
+    if (pOperationInformation->KernelHandle) {
+        return OB_PREOP_SUCCESS;
+    }
+
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // CRITICAL FIX: If caller and target are the same process, allow everything
     if (callerPid == targetPid) {
-        return OB_PREOP_SUCCESS;
+        return OB_PREOP_SUCCESS; // Allow self-access
     }
 
-    // Check protection status of both processes
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Allow operations between protected processes (family trust)
-    if (callerIsProtected && targetIsProtected) {
-        // Both are in our protected family - allow full access
+    // Allow: Protected -> Protected OR Protected -> External
+    if (callerIsProtected) {
         return OB_PREOP_SUCCESS;
     }
 
-    // Allow protected process accessing external processes
-    if (callerIsProtected && !targetIsProtected) {
-        // Protected process can do anything to non-protected processes
-        return OB_PREOP_SUCCESS;
-    }
-
-    // ONLY block when: EXTERNAL process -> PROTECTED process
+    // Main protection logic: External -> Protected
     if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
 
-        // Extract the desired access mask based on the operation type.
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             AttackType = L"PROCESS_OPEN_BLOCKED";
@@ -206,22 +200,22 @@ OB_PREOP_CALLBACK_STATUS preCall(
             AttackType = L"PROCESS_DUPLICATE_BLOCKED";
         }
 
-        // If the caller requests dangerous permissions for our protected target, block the operation.
+        // If the caller requests dangerous permissions, block the ENTIRE operation.
         if ((DesiredAccess & PROCESS_DANGEROUS_MASK) && AttackType) {
+            DbgPrint("[Process-Protection] BLOCKING attempt from PID %llu to protected PID %llu\r\n",
+                (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
+
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            // Block access by stripping dangerous rights
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-            }
-            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-            }
+            // *** THE FIX: REJECT THE OPERATION ***
+            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED;
+            return OB_PREOP_FAILURE; // This actually blocks the handle creation/duplication
         }
     }
 
     return OB_PREOP_SUCCESS; // Allow all other operations
 }
+
 
 // CALLBACK: Intercepts thread handle operations.
 OB_PREOP_CALLBACK_STATUS threadPreCall(
@@ -230,7 +224,10 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // Identify the process INITIATING the action (the caller).
+    if (pOperationInformation->KernelHandle) {
+        return OB_PREOP_SUCCESS;
+    }
+
     PEPROCESS currentProc = PsGetCurrentProcess();
     HANDLE callerPid = PsGetProcessId(currentProc);
 
@@ -243,33 +240,23 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // CRITICAL FIX: If caller and target are the same process, allow everything
     if (callerPid == targetPid) {
-        return OB_PREOP_SUCCESS;
+        return OB_PREOP_SUCCESS; // Allow self-access
     }
 
-    // Check protection status of both processes
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Allow operations between protected processes (family trust)
-    if (callerIsProtected && targetIsProtected) {
-        // Both are in our protected family - allow full access
+    // Allow: Protected -> Protected OR Protected -> External
+    if (callerIsProtected) {
         return OB_PREOP_SUCCESS;
     }
 
-    // Allow protected process accessing external threads
-    if (callerIsProtected && !targetIsProtected) {
-        // Protected process can do anything to non-protected threads
-        return OB_PREOP_SUCCESS;
-    }
-
-    // ONLY block when: EXTERNAL process -> PROTECTED thread
+    // Main protection logic: External -> Protected
     if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
 
-        // Extract the desired access mask based on the operation type.
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
             AttackType = L"THREAD_OPEN_BLOCKED";
@@ -279,16 +266,15 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
             AttackType = L"THREAD_DUPLICATE_BLOCKED";
         }
 
-        // If the caller requests dangerous permissions for the thread, block the operation.
         if ((DesiredAccess & THREAD_DANGEROUS_MASK) && AttackType) {
+            DbgPrint("[Process-Protection] BLOCKING thread access from PID %llu to protected PID %llu\r\n",
+                (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
+
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
-            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
-            }
+            // *** THE FIX: REJECT THE OPERATION ***
+            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED;
+            return OB_PREOP_FAILURE;
         }
     }
 
@@ -331,7 +317,7 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
         return FALSE;
     }
 
-    // Patterns to match. Using specific paths is more secure.
+    // Define the paths of the executables to be protected.
     static const PCWSTR patterns[] = {
         L"\\HydraDragonAntivirus\\hydradragon\\Owlyshield\\Owlyshield Service\\owlyshield_ransom.exe",
         L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
@@ -352,28 +338,6 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
     return result;
 }
 
-static BOOLEAN IsCallerLauncher(PEPROCESS Proc) {
-    PUNICODE_STRING pImageName = NULL;
-    if (!Proc || !NT_SUCCESS(SeLocateProcessImageName(Proc, &pImageName)) || !pImageName || !pImageName->Buffer) {
-        if (pImageName) ExFreePool(pImageName);
-        return FALSE;
-    }
-
-    static const PCWSTR launcherPatterns[] = {
-        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe"
-    };
-
-    BOOLEAN result = FALSE;
-    for (ULONG i = 0; i < ARRAYSIZE(launcherPatterns); ++i) {
-        if (UnicodeStringEndsWithInsensitive(pImageName, launcherPatterns[i])) {
-            result = TRUE;
-            break;
-        }
-    }
-
-    ExFreePool(pImageName);
-    return result;
-}
 
 // Case-insensitive check to see if 'Source' string ENDS WITH 'Pattern'.
 BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern) {
