@@ -252,9 +252,11 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
 
-    // Allow: Protected -> Protected OR Protected -> External
-    if (callerIsProtected) {
-        return OB_PREOP_SUCCESS;
+    // If protected process accesses others -> grant extra access
+    if (callerIsProtected && !targetIsProtected) {
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess |= PROCESS_ALL_ACCESS;
+        }
     }
 
     // Main protection logic: External -> Protected
