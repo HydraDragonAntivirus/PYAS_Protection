@@ -2,6 +2,7 @@
 #ifndef CXX_FILEPROTECTX64_H
 #define CXX_FILEPROTECTX64_H
 #include <ntifs.h>
+#include <ntddk.h>
 #include <devioctl.h>
 #include <ntstrsafe.h>         // RtlStringCb* functions
 #include <wdm.h>               // kernel-mode APIs
