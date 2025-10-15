@@ -200,22 +200,27 @@ OB_PREOP_CALLBACK_STATUS preCall(
             AttackType = L"PROCESS_DUPLICATE_BLOCKED";
         }
 
-        // If the caller requests dangerous permissions, block the ENTIRE operation.
+        // If the caller requests dangerous permissions, strip them instead of blocking.
         if ((DesiredAccess & PROCESS_DANGEROUS_MASK) && AttackType) {
-            DbgPrint("[Process-Protection] BLOCKING attempt from PID %llu to protected PID %llu\r\n",
+            DbgPrint("[Process-Protection] STRIPPING DANGEROUS ACCESS from PID %llu to protected PID %llu\r\n",
                 (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            // *** THE FIX: REJECT THE OPERATION ***
-            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED;
-            return OB_PREOP_FAILURE; // This actually blocks the handle creation/duplication
+            // *** THE FIX FOR OLDER WDKs: STRIP DANGEROUS ACCESS RIGHTS ***
+            // Instead of failing the operation, we allow it but remove dangerous permissions.
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+            }
+            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+            }
         }
     }
 
-    return OB_PREOP_SUCCESS; // Allow all other operations
+    // Always return success for older WDKs; we only modify access rights.
+    return OB_PREOP_SUCCESS;
 }
-
 
 // CALLBACK: Intercepts thread handle operations.
 OB_PREOP_CALLBACK_STATUS threadPreCall(
@@ -267,18 +272,23 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         }
 
         if ((DesiredAccess & THREAD_DANGEROUS_MASK) && AttackType) {
-            DbgPrint("[Process-Protection] BLOCKING thread access from PID %llu to protected PID %llu\r\n",
+            DbgPrint("[Process-Protection] STRIPPING DANGEROUS THREAD ACCESS from PID %llu to protected PID %llu\r\n",
                 (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
 
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            // *** THE FIX: REJECT THE OPERATION ***
-            pOperationInformation->ReturnStatus = STATUS_ACCESS_DENIED;
-            return OB_PREOP_FAILURE;
+            // *** THE FIX FOR OLDER WDKs: STRIP DANGEROUS ACCESS RIGHTS ***
+            if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            }
+            else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+                pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            }
         }
     }
 
-    return OB_PREOP_SUCCESS; // Allow all other operations
+    // Always return success for older WDKs; we only modify access rights.
+    return OB_PREOP_SUCCESS;
 }
 
 //
