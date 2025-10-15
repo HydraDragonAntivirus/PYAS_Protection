@@ -158,30 +158,6 @@ VOID CreateProcessNotifyRoutine(
     }
 }
 
-// Helper: Check if process is HydraDragonAntivirus
-BOOLEAN IsHydraDragonAV(PEPROCESS Process) {
-    PUNICODE_STRING pImageName = NULL;
-    NTSTATUS status;
-    BOOLEAN result = FALSE;
-
-    status = SeLocateProcessImageName(Process, &pImageName);
-    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer) {
-        if (pImageName) ExFreePool(pImageName);
-        return FALSE;
-    }
-
-    // ONLY match your specific HydraDragonAntivirus path
-    // This prevents malware from spoofing other AV paths
-    static const PCWSTR hydraDragonPattern = L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe";
-
-    if (UnicodeStringEndsWithInsensitive(pImageName, hydraDragonPattern)) {
-        result = TRUE;
-        DbgPrint("[Process-Protection] Detected HydraDragonAV: %wZ\r\n", pImageName);
-    }
-
-    ExFreePool(pImageName);
-    return result;
-}
 // CALLBACK: Intercepts process handle operations
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
