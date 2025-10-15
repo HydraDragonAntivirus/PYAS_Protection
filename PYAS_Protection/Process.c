@@ -1,4 +1,4 @@
-// Process.c - Process & Thread protection with PID tracking and user-mode alerting
+// Process.c - Process & Thread protection with PID tracking and HydraDragon AV exemption
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include "Driver_Process.h"
@@ -79,7 +79,7 @@ NTSTATUS ProtectProcess() {
     obReg.Version = ObGetFilterVersion();
     obReg.OperationRegistrationCount = 2;
     obReg.RegistrationContext = NULL;
-    RtlInitUnicodeString(&obReg.Altitude, L"321000"); // Example altitude
+    RtlInitUnicodeString(&obReg.Altitude, L"321000");
 
     // Process protection
     opReg[0].ObjectType = PsProcessType;
@@ -147,8 +147,9 @@ VOID CreateProcessNotifyRoutine(
             if (pEntry->ProcessId == ProcessId) {
                 RemoveEntryList(&pEntry->ListEntry);
                 ExFreePoolWithTag(pEntry, PID_LIST_TAG);
-                DbgPrint("[Process-Protection] Protected process terminated: PID %llu\r\n", (unsigned long long)(ULONG_PTR)ProcessId);
-                break; // Found and removed
+                DbgPrint("[Process-Protection] Protected process terminated: PID %llu\r\n",
+                    (unsigned long long)(ULONG_PTR)ProcessId);
+                break;
             }
             pCurrent = pCurrent->Flink;
         }
@@ -157,14 +158,38 @@ VOID CreateProcessNotifyRoutine(
     }
 }
 
-// CALLBACK: Intercepts process handle operations.
+// Helper: Check if process is HydraDragonAntivirus (YOUR AV ONLY)
+BOOLEAN IsHydraDragonAV(PEPROCESS Process) {
+    PUNICODE_STRING pImageName = NULL;
+    NTSTATUS status;
+    BOOLEAN result = FALSE;
+
+    status = SeLocateProcessImageName(Process, &pImageName);
+    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer) {
+        if (pImageName) ExFreePool(pImageName);
+        return FALSE;
+    }
+
+    // ONLY match your specific HydraDragonAntivirus path
+    // This prevents malware from spoofing other AV paths
+    static const PCWSTR hydraDragonPattern = L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe";
+
+    if (UnicodeStringEndsWithInsensitive(pImageName, hydraDragonPattern)) {
+        result = TRUE;
+        DbgPrint("[Process-Protection] Detected HydraDragonAV: %wZ\r\n", pImageName);
+    }
+
+    ExFreePool(pImageName);
+    return result;
+}
+
+// CALLBACK: Intercepts process handle operations
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // Kernel-mode callers should not be restricted.
     if (pOperationInformation->KernelHandle) {
         return OB_PREOP_SUCCESS;
     }
@@ -180,13 +205,30 @@ OB_PREOP_CALLBACK_STATUS preCall(
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
+    BOOLEAN callerIsHydraDragon = IsHydraDragonAV(currentProc);
 
     // Allow: Protected -> Protected OR Protected -> External
     if (callerIsProtected) {
         return OB_PREOP_SUCCESS;
     }
 
-    // Main protection logic: External -> Protected
+    // **GRANT FULL ACCESS TO HYDRADRAGON AV ONLY**
+    if (callerIsHydraDragon && targetIsProtected) {
+        DbgPrint("[Process-Protection] Granting HydraDragonAV full access: PID %llu -> protected PID %llu\r\n",
+            (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
+
+        // Grant full access
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = PROCESS_ALL_ACCESS;
+        }
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = PROCESS_ALL_ACCESS;
+        }
+
+        return OB_PREOP_SUCCESS;
+    }
+
+    // Main protection: External -> Protected (strip dangerous access)
     if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
@@ -207,8 +249,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
 
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            // *** THE FIX FOR OLDER WDKs: STRIP DANGEROUS ACCESS RIGHTS ***
-            // Instead of failing the operation, we allow it but remove dangerous permissions.
+            // Strip dangerous access rights
             if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
                 pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
             }
@@ -222,7 +263,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
     return OB_PREOP_SUCCESS;
 }
 
-// CALLBACK: Intercepts thread handle operations.
+// CALLBACK: Intercepts thread handle operations
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -251,15 +292,32 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
+    BOOLEAN callerIsHydraDragon = IsHydraDragonAV(currentProc);
 
-    // If protected process accesses others -> grant extra access
+    // Protected process accesses others -> grant extra access
     if (callerIsProtected && !targetIsProtected) {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess |= PROCESS_ALL_ACCESS;
         }
     }
 
-    // Main protection logic: External -> Protected
+    // **GRANT FULL THREAD ACCESS TO HYDRADRAGON AV ONLY**
+    if (callerIsHydraDragon && targetIsProtected) {
+        DbgPrint("[Process-Protection] Granting HydraDragonAV full thread access: PID %llu -> protected PID %llu\r\n",
+            (unsigned long long)(ULONG_PTR)callerPid, (unsigned long long)(ULONG_PTR)targetPid);
+
+        // Grant full access
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = THREAD_ALL_ACCESS;
+        }
+        else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = THREAD_ALL_ACCESS;
+        }
+
+        return OB_PREOP_SUCCESS;
+    }
+
+    // Main protection: External -> Protected (strip dangerous access)
     if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
@@ -279,7 +337,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
             QueueProcessAlertToUserMode(targetProc, currentProc, AttackType);
 
-            // *** THE FIX FOR OLDER WDKs: STRIP DANGEROUS ACCESS RIGHTS ***
+            // Strip dangerous access rights
             if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
                 pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
             }
@@ -329,7 +387,7 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
         return FALSE;
     }
 
-    // Define the paths of the executables to be protected.
+    // Define the paths of the executables to be protected
     static const PCWSTR patterns[] = {
         L"\\Owlyshield Service\\owlyshield_ransom.exe",
         L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
@@ -373,6 +431,7 @@ BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
 // --- User-Mode Alerting ---
 // (No changes needed in this section)
 //
+
 NTSTATUS QueueProcessAlertToUserMode(
     PEPROCESS TargetProcess,
     PEPROCESS AttackerProcess,
