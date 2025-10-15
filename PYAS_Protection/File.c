@@ -309,9 +309,9 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         // Check for protected HydraDragonAntivirus components
         static const PCWSTR protectedPatterns[] = {
             L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
-            L"\\Owlyshield Service\\owlyshield_ransom.exe",
-            L"\\Owlyshield Service\\tensorflowlite_c.dll",
-            L"\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
+            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\Owlyshield Service\\owlyshield_ransom.exe",
+            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\Owlyshield Service\\tensorflowlite_c.dll",
+            L"HydraDragonAntivirus\\hydradragon\\Owlyshield\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
             L"\\sanctum\\app.exe",
             L"\\sanctum\\server.exe",
             L"\\sanctum\\um_engine.exe",

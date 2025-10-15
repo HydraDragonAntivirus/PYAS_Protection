@@ -175,15 +175,24 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // If the caller is one of our protected processes, trust it completely and allow everything.
-    if (IsProtectedProcessByPid(callerPid)) {
+    // Check protection status of both processes
+    BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
+    BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
+
+    // Allow operations between protected processes (family trust)
+    if (callerIsProtected && targetIsProtected) {
+        // Both are in our protected family - allow full access
         return OB_PREOP_SUCCESS;
     }
 
-    // --- If the caller is NOT protected, we check the target ---
+    // Allow protected process accessing external processes
+    if (callerIsProtected && !targetIsProtected) {
+        // Protected process can do anything to non-protected processes
+        return OB_PREOP_SUCCESS;
+    }
 
-    // Check if the target is a process we are protecting.
-    if (IsProtectedProcessByPid(targetPid)) {
+    // ONLY block when: EXTERNAL process -> PROTECTED process
+    if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
 
@@ -215,7 +224,6 @@ OB_PREOP_CALLBACK_STATUS preCall(
 }
 
 // CALLBACK: Intercepts thread handle operations.
-// CALLBACK: Intercepts thread handle operations.
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -240,15 +248,24 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // If the caller is one of our protected processes, trust it completely and allow everything.
-    if (IsProtectedProcessByPid(callerPid)) {
+    // Check protection status of both processes
+    BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
+    BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
+
+    // Allow operations between protected processes (family trust)
+    if (callerIsProtected && targetIsProtected) {
+        // Both are in our protected family - allow full access
         return OB_PREOP_SUCCESS;
     }
 
-    // --- If the caller is NOT protected, we check the target's parent process ---
+    // Allow protected process accessing external threads
+    if (callerIsProtected && !targetIsProtected) {
+        // Protected process can do anything to non-protected threads
+        return OB_PREOP_SUCCESS;
+    }
 
-    // Check if the thread belongs to a process we are protecting.
-    if (IsProtectedProcessByPid(targetPid)) {
+    // ONLY block when: EXTERNAL process -> PROTECTED thread
+    if (!callerIsProtected && targetIsProtected) {
         ACCESS_MASK DesiredAccess = 0;
         PCWSTR AttackType = NULL;
 
