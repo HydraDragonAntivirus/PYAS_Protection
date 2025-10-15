@@ -63,8 +63,3 @@ typedef struct _OBJECT_TYPE_TEMP
 OB_PREOP_CALLBACK_STATUS PreCallBack(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation);
 NTSTATUS ProtectFileByObRegisterCallbacks();
 #endif    
-
-
-#ifndef CXX_FILEPROTECTX64_H
-#include "FileProtectX64.h"
-#endif
