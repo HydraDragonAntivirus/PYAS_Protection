@@ -236,8 +236,8 @@ OB_PREOP_CALLBACK_STATUS preCall(
         OrigAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess; // fallback
     }
 
-    // Bits we must NOT strip because they are needed for process startup/resume
-    const ACCESS_MASK PreserveProcessBits = PROCESS_SUSPEND_RESUME | SYNCHRONIZE;
+    // Preserve only SYNCHRONIZE, remove suspend/resume
+    const ACCESS_MASK PreserveProcessBits = SYNCHRONIZE;
 
     if (DesiredAccess & PROCESS_DANGEROUS_MASK)
     {
@@ -252,12 +252,10 @@ OB_PREOP_CALLBACK_STATUS preCall(
         // Only clear dangerous bits that are NOT in PreserveProcessBits
         ACCESS_MASK ToClear = PROCESS_DANGEROUS_MASK & ~PreserveProcessBits;
 
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
             pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~ToClear;
-        }
-        else {
+        else
             pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~ToClear;
-        }
     }
 
     // Special-case restore (retain your existing 0x1041 handling if needed)
@@ -321,8 +319,8 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
         DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
 
-    // Bits we must not strip for threads (so parent/system can resume/initialize thread)
-    const ACCESS_MASK PreserveThreadBits = THREAD_SUSPEND_RESUME | SYNCHRONIZE;
+    // Preserve only SYNCHRONIZE, remove suspend/resume
+    const ACCESS_MASK PreserveThreadBits = SYNCHRONIZE;
 
     if (DesiredAccess & THREAD_DANGEROUS_MASK)
     {
