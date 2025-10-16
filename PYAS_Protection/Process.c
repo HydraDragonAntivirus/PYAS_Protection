@@ -62,19 +62,45 @@ static POB_OPERATION_REGISTRATION g_OpReg = NULL;
 
 NTSTATUS ProtectProcess(void)
 {
-    NTSTATUS status;
+    NTSTATUS status = STATUS_SUCCESS;
 
+    // Safety: ensure called at PASSIVE_LEVEL
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        DbgPrint("ProtectProcess: wrong IRQL %u\n", (ULONG)KeGetCurrentIrql());
+        return STATUS_INVALID_LEVEL;
+    }
+
+    // Init list/spinlock (assuming globals declared elsewhere)
+    InitializeListHead(&g_ProtectedPidsList);
+    KeInitializeSpinLock(&g_ProtectedPidsLock);
+
+    // Register process notify first (optional, but keep your behavior)
+    status = PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, FALSE);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("[Process-Protection] PsSetCreateProcessNotifyRoutineEx failed: 0x%X\n", status);
+        return status;
+    }
+
+    // Allocate heap registrations (use NonPagedPoolNx)
     g_OpReg = (POB_OPERATION_REGISTRATION)ExAllocatePoolWithTag(
         NonPagedPoolNx, sizeof(OB_OPERATION_REGISTRATION) * 2, 'gOpR');
-    if (!g_OpReg) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!g_OpReg) {
+        PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
     RtlZeroMemory(g_OpReg, sizeof(OB_OPERATION_REGISTRATION) * 2);
 
     g_ObReg = (POB_CALLBACK_REGISTRATION)ExAllocatePoolWithTag(
         NonPagedPoolNx, sizeof(OB_CALLBACK_REGISTRATION), 'gObR');
-    if (!g_ObReg) { ExFreePoolWithTag(g_OpReg, 'gOpR'); g_OpReg = NULL; return STATUS_INSUFFICIENT_RESOURCES; }
+    if (!g_ObReg) {
+        ExFreePoolWithTag(g_OpReg, 'gOpR');
+        g_OpReg = NULL;
+        PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
     RtlZeroMemory(g_ObReg, sizeof(OB_CALLBACK_REGISTRATION));
 
-    // fill g_OpReg[0], g_OpReg[1]...
+    // Fill g_OpReg
     g_OpReg[0].ObjectType = PsProcessType;
     g_OpReg[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
     g_OpReg[0].PreOperation = preCall;
@@ -85,19 +111,27 @@ NTSTATUS ProtectProcess(void)
     g_OpReg[1].PreOperation = threadPreCall;
     g_OpReg[1].PostOperation = NULL;
 
+    // Fill g_ObReg
     g_ObReg->Version = ObGetFilterVersion();
     g_ObReg->OperationRegistrationCount = 2;
     g_ObReg->OperationRegistration = g_OpReg;
     g_ObReg->RegistrationContext = NULL;
     RtlInitUnicodeString(&g_ObReg->Altitude, L"321000");
 
+    // Single, correct registration
     status = ObRegisterCallbacks(g_ObReg, &g_ObRegistrationHandle);
     if (!NT_SUCCESS(status)) {
+        DbgPrint("[Process-Protection] ObRegisterCallbacks failed: 0x%X\n", status);
         ExFreePoolWithTag(g_OpReg, 'gOpR');
         ExFreePoolWithTag(g_ObReg, 'gObR');
-        g_OpReg = NULL; g_ObReg = NULL;
+        g_OpReg = NULL;
+        g_ObReg = NULL;
+        PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
+        return status;
     }
-    return status;
+
+    DbgPrint("[Process-Protection] ObRegisterCallbacks succeeded\n");
+    return STATUS_SUCCESS;
 }
 
 //
