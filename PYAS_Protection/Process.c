@@ -223,48 +223,14 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller not protected, target protected -> inspect desired access
-    ACCESS_MASK DesiredAccess = 0;
-    ACCESS_MASK OrigAccess = 0;
+    // Alert user-mode for any non-protected caller trying to access a protected process
+    QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
 
-    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-        OrigAccess = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
-    }
-    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-        OrigAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess; // fallback
-    }
-
-    // Preserve only SYNCHRONIZE, remove suspend/resume
-    const ACCESS_MASK PreserveProcessBits = SYNCHRONIZE;
-
-    if (DesiredAccess & PROCESS_DANGEROUS_MASK)
-    {
-        // Debug print
-        DbgPrint("preCall(PROC): caller=%u target=%u op=%u desired=0x%X orig=0x%X\n",
-            (ULONG)(ULONG_PTR)callerPid, (ULONG)(ULONG_PTR)targetPid,
-            (ULONG)pOperationInformation->Operation, (ULONG)DesiredAccess, (ULONG)OrigAccess);
-
-        // Alert user-mode (queues work item - safe)
-        QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
-
-        // Only clear dangerous bits that are NOT in PreserveProcessBits
-        ACCESS_MASK ToClear = PROCESS_DANGEROUS_MASK & ~PreserveProcessBits;
-
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~ToClear;
-        else
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~ToClear;
-    }
-
-    // Special-case restore (retain your existing 0x1041 handling if needed)
-    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-        int code = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
-        if (code == 0x1041) {
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL | PROCESS_ALL_ACCESS;
-        }
-    }
+    // Strip all access except STANDARD_RIGHTS_READ (optional minimal safe access)
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_READ;
+    else
+        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = STANDARD_RIGHTS_READ;
 
     return OB_PREOP_SUCCESS;
 }
@@ -312,31 +278,14 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller not protected, target protected -> inspect desired access
-    ACCESS_MASK DesiredAccess = 0;
+    // Alert user-mode for non-protected caller
+    QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_ACCESS_BLOCKED");
+
+    // Strip all access except minimal safe rights
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-        DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
-        DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
-
-    // Preserve only SYNCHRONIZE, remove suspend/resume
-    const ACCESS_MASK PreserveThreadBits = SYNCHRONIZE;
-
-    if (DesiredAccess & THREAD_DANGEROUS_MASK)
-    {
-        DbgPrint("preCall(THREAD): caller=%u target=%u op=%u desired=0x%X\n",
-            (ULONG)(ULONG_PTR)callerPid, (ULONG)(ULONG_PTR)targetPid,
-            (ULONG)pOperationInformation->Operation, (ULONG)DesiredAccess);
-
-        QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_ACCESS_BLOCKED");
-
-        ACCESS_MASK ToClear = THREAD_DANGEROUS_MASK & ~PreserveThreadBits;
-
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~ToClear;
-        else
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~ToClear;
-    }
+        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
+    else
+        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
 
     return OB_PREOP_SUCCESS;
 }

@@ -19,12 +19,12 @@
 #define PROCESS_SET_QUOTA                 (0x0100)  
 #define PROCESS_SET_INFORMATION           (0x0200)  
 #define PROCESS_QUERY_INFORMATION         (0x0400)  
-// #define PROCESS_SUSPEND_RESUME            (0x0800)
+#define PROCESS_SUSPEND_RESUME            (0x0800)
 #define PROCESS_SET_LIMITED_INFORMATION   (0x2000)
 #endif
 
 #define THREAD_TERMINATE           0x0001
-// #define THREAD_SUSPEND_RESUME      0x0002
+#define THREAD_SUSPEND_RESUME      0x0002
 #define THREAD_GET_CONTEXT         0x0008
 #define THREAD_SET_CONTEXT         0x0010
 #define THREAD_SET_INFORMATION     0x0020
@@ -41,17 +41,14 @@
 #define PID_LIST_TAG 'diPP' // Pool tag for our PID list allocations
 
 // Process access rights considered dangerous
-// NOTE: We exclude PROCESS_SUSPEND_RESUME here so we do not break creation/resume semantics.
-// If you want to strip suspend/resume later, do it in code with careful checks instead.
 #define PROCESS_DANGEROUS_MASK (PROCESS_TERMINATE | PROCESS_CREATE_THREAD | \
                                 PROCESS_SET_SESSIONID | PROCESS_VM_OPERATION | \
                                 PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE | \
                                 PROCESS_CREATE_PROCESS | PROCESS_SET_QUOTA | PROCESS_SET_INFORMATION | \
-                                /*PROCESS_SUSPEND_RESUME*/ PROCESS_QUERY_INFORMATION | PROCESS_SET_LIMITED_INFORMATION)
+                                PROCESS_SUSPEND_RESUME PROCESS_QUERY_INFORMATION | PROCESS_SET_LIMITED_INFORMATION)
 
 // Thread access rights considered dangerous
-// Exclude THREAD_SUSPEND_RESUME to avoid leaving threads suspended during creation.
-#define THREAD_DANGEROUS_MASK (THREAD_TERMINATE /*| THREAD_SUSPEND_RESUME */| THREAD_SET_CONTEXT | \
+#define THREAD_DANGEROUS_MASK (THREAD_TERMINATE | THREAD_SUSPEND_RESUME| THREAD_SET_CONTEXT | \
                                THREAD_SET_INFORMATION | THREAD_SET_THREAD_TOKEN | THREAD_IMPERSONATE | \
                                THREAD_DIRECT_IMPERSONATION)
 
