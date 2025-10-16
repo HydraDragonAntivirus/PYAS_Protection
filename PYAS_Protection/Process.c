@@ -184,7 +184,7 @@ VOID CreateProcessNotifyRoutine(
     }
 }
 
-// CALLBACK: Intercepts process handle operations
+// CALLBACK: Intercepts process handle operations (improved - preserves resume bits)
 OB_PREOP_CALLBACK_STATUS preCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -212,7 +212,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
     if (!targetIsProtected)
         return OB_PREOP_SUCCESS;
 
-    // If caller is also protected, grant full access
+    // If caller is protected, grant full access
     if (callerIsProtected)
     {
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
@@ -223,33 +223,56 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller not protected, target protected -> clear dangerous bits
+    // Caller not protected, target protected -> inspect desired access
     ACCESS_MASK DesiredAccess = 0;
-    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
+    ACCESS_MASK OrigAccess = 0;
+
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
         DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
-    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
+        OrigAccess = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+    }
+    else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
         DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+        OrigAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess; // fallback
+    }
+
+    // Bits we must NOT strip because they are needed for process startup/resume
+    const ACCESS_MASK PreserveProcessBits = PROCESS_SUSPEND_RESUME | SYNCHRONIZE;
 
     if (DesiredAccess & PROCESS_DANGEROUS_MASK)
     {
-        // Alert user-mode
+        // Debug print
+        DbgPrint("preCall(PROC): caller=%u target=%u op=%u desired=0x%X orig=0x%X\n",
+            (ULONG)(ULONG_PTR)callerPid, (ULONG)(ULONG_PTR)targetPid,
+            (ULONG)pOperationInformation->Operation, (ULONG)DesiredAccess, (ULONG)OrigAccess);
+
+        // Alert user-mode (queues work item - safe)
         QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
 
-        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
-        else
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~PROCESS_DANGEROUS_MASK;
+        // Only clear dangerous bits that are NOT in PreserveProcessBits
+        ACCESS_MASK ToClear = PROCESS_DANGEROUS_MASK & ~PreserveProcessBits;
+
+        if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~ToClear;
+        }
+        else {
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~ToClear;
+        }
     }
 
-    // Restore full rights for 0x1041 cases
-    int code = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
-    if (code == 0x1041)
-        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL | PROCESS_ALL_ACCESS;
+    // Special-case restore (retain your existing 0x1041 handling if needed)
+    if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        int code = pOperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess;
+        if (code == 0x1041) {
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_ALL | PROCESS_ALL_ACCESS;
+        }
+    }
 
     return OB_PREOP_SUCCESS;
 }
 
-// CALLBACK: Intercepts thread handle operations
+
+// CALLBACK: Intercepts thread handle operations (improved - preserves resume bits)
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -291,21 +314,30 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
     }
 
-    // Caller not protected, target protected -> clear dangerous thread bits
+    // Caller not protected, target protected -> inspect desired access
     ACCESS_MASK DesiredAccess = 0;
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
         DesiredAccess = pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
     else if (pOperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE)
         DesiredAccess = pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
 
+    // Bits we must not strip for threads (so parent/system can resume/initialize thread)
+    const ACCESS_MASK PreserveThreadBits = THREAD_SUSPEND_RESUME | SYNCHRONIZE;
+
     if (DesiredAccess & THREAD_DANGEROUS_MASK)
     {
+        DbgPrint("preCall(THREAD): caller=%u target=%u op=%u desired=0x%X\n",
+            (ULONG)(ULONG_PTR)callerPid, (ULONG)(ULONG_PTR)targetPid,
+            (ULONG)pOperationInformation->Operation, (ULONG)DesiredAccess);
+
         QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_ACCESS_BLOCKED");
 
+        ACCESS_MASK ToClear = THREAD_DANGEROUS_MASK & ~PreserveThreadBits;
+
         if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~ToClear;
         else
-            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~THREAD_DANGEROUS_MASK;
+            pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess &= ~ToClear;
     }
 
     return OB_PREOP_SUCCESS;
