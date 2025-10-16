@@ -1,4 +1,4 @@
-// Process.c - Process & Thread protection with PID tracking and HydraDragon AV exemption
+// Process.c - Process & Thread protection with PID tracking and system process whitelist
 #include <ntifs.h>
 #include <ntstrsafe.h>
 #include "Driver_Process.h"
@@ -70,18 +70,18 @@ NTSTATUS ProtectProcess(void)
         return STATUS_INVALID_LEVEL;
     }
 
-    // Init list/spinlock (assuming globals declared elsewhere)
+    // Init list/spinlock
     InitializeListHead(&g_ProtectedPidsList);
     KeInitializeSpinLock(&g_ProtectedPidsLock);
 
-    // Register process notify first (optional, but keep your behavior)
+    // Register process notify
     status = PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, FALSE);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[Process-Protection] PsSetCreateProcessNotifyRoutineEx failed: 0x%X\n", status);
         return status;
     }
 
-    // Allocate heap registrations (use NonPagedPoolNx)
+    // Allocate heap registrations
     g_OpReg = (POB_OPERATION_REGISTRATION)ExAllocatePoolWithTag(
         NonPagedPoolNx, sizeof(OB_OPERATION_REGISTRATION) * 2, 'gOpR');
     if (!g_OpReg) {
@@ -118,7 +118,7 @@ NTSTATUS ProtectProcess(void)
     g_ObReg->RegistrationContext = NULL;
     RtlInitUnicodeString(&g_ObReg->Altitude, L"321000");
 
-    // Single, correct registration
+    // Register callbacks
     status = ObRegisterCallbacks(g_ObReg, &g_ObRegistrationHandle);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[Process-Protection] ObRegisterCallbacks failed: 0x%X\n", status);
@@ -197,6 +197,12 @@ OB_PREOP_CALLBACK_STATUS preCall(
         return OB_PREOP_SUCCESS;
 
     PEPROCESS currentProc = PsGetCurrentProcess();
+
+    // Allow Windows system processes full access to everything
+    if (IsSystemProcess(currentProc)) {
+        return OB_PREOP_SUCCESS;
+    }
+
     HANDLE callerPid = PsGetProcessId(currentProc);
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
     HANDLE targetPid = PsGetProcessId(targetProc);
@@ -226,17 +232,16 @@ OB_PREOP_CALLBACK_STATUS preCall(
     // Alert user-mode for any non-protected caller trying to access a protected process
     QueueProcessAlertToUserMode(targetProc, currentProc, L"PROCESS_ACCESS_BLOCKED");
 
-    // Strip all access except STANDARD_RIGHTS_READ (optional minimal safe access)
+    // Strip dangerous access but allow minimal query rights
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = STANDARD_RIGHTS_READ;
+        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = SAFE_PROCESS_ACCESS;
     else
-        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = STANDARD_RIGHTS_READ;
+        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = SAFE_PROCESS_ACCESS;
 
     return OB_PREOP_SUCCESS;
 }
 
 
-// CALLBACK: Intercepts thread handle operations (improved - preserves resume bits)
 OB_PREOP_CALLBACK_STATUS threadPreCall(
     _In_ PVOID RegistrationContext,
     _In_ POB_PRE_OPERATION_INFORMATION pOperationInformation
@@ -248,6 +253,12 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
         return OB_PREOP_SUCCESS;
 
     PEPROCESS currentProc = PsGetCurrentProcess();
+
+    // Allow Windows system processes full access to all threads
+    if (IsSystemProcess(currentProc)) {
+        return OB_PREOP_SUCCESS;
+    }
+
     HANDLE callerPid = PsGetProcessId(currentProc);
 
     PETHREAD targetThread = (PETHREAD)pOperationInformation->Object;
@@ -281,11 +292,11 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
     // Alert user-mode for non-protected caller
     QueueProcessAlertToUserMode(targetProc, currentProc, L"THREAD_ACCESS_BLOCKED");
 
-    // Strip all access except minimal safe rights
+    // Strip dangerous access but allow minimal query rights
     if (pOperationInformation->Operation == OB_OPERATION_HANDLE_CREATE)
-        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
+        pOperationInformation->Parameters->CreateHandleInformation.DesiredAccess = SAFE_THREAD_ACCESS;
     else
-        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
+        pOperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = SAFE_THREAD_ACCESS;
 
     return OB_PREOP_SUCCESS;
 }
@@ -347,6 +358,37 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
     return result;
 }
 
+BOOLEAN IsSystemProcess(PEPROCESS Process) {
+    PUNICODE_STRING pImageName = NULL;
+    NTSTATUS status;
+    BOOLEAN result = FALSE;
+
+    status = SeLocateProcessImageName(Process, &pImageName);
+    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer) {
+        if (pImageName) ExFreePool(pImageName);
+        return FALSE;
+    }
+
+    // Critical Windows system processes that need full access
+    static const PCWSTR systemProcesses[] = {
+        L"\\Windows\\System32\\csrss.exe",
+        L"\\Windows\\System32\\services.exe",
+        L"\\Windows\\System32\\svchost.exe",
+        L"\\Windows\\System32\\lsass.exe",
+        L"\\Windows\\System32\\smss.exe",
+        L"\\Windows\\System32\\wininit.exe"
+    };
+
+    for (ULONG i = 0; i < ARRAYSIZE(systemProcesses); ++i) {
+        if (UnicodeStringEndsWithInsensitive(pImageName, systemProcesses[i])) {
+            result = TRUE;
+            break;
+        }
+    }
+
+    ExFreePool(pImageName);
+    return result;
+}
 
 // Case-insensitive check to see if 'Source' string ENDS WITH 'Pattern'.
 BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern) {
@@ -368,7 +410,6 @@ BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
 
 //
 // --- User-Mode Alerting ---
-// (No changes needed in this section)
 //
 
 NTSTATUS QueueProcessAlertToUserMode(
@@ -473,7 +514,7 @@ VOID ProcessAlertWorker(PVOID Context)
         NULL
     );
 
-    // Open pipe (async worker - safe to call Zw APIs)
+    // Open pipe
     status = ZwCreateFile(
         &pipeHandle,
         FILE_WRITE_DATA | SYNCHRONIZE,
