@@ -7,6 +7,8 @@
 #include <ntstrsafe.h>         // RtlStringCb* functions
 #include <wdm.h>               // kernel-mode APIs
 
+#define SELF_DEFENSE_PIPE_NAME  L"\\??\\pipe\\Global\\self_defense_alerts"
+
 typedef struct _OBJECT_TYPE_INITIALIZER
 {
     UINT16       Length;

@@ -8,7 +8,6 @@
 #define REG_PROTECT_PYAS L"\\Services\\SimplePYASProtection"
 #define REG_PROTECT_OWLY L"\\Services\\owlyshield_ransom"
 #define REG_PROTECT_SANCTUM L"\\Services\\sanctum_ppl_runner"
-#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\self_defense_alerts"
 
 LARGE_INTEGER Cookie;
 

@@ -4,6 +4,7 @@
 
 #define REG_TAG 'gkER'
 #define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OWLYSHIELD"
+#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\Global\\self_defense_alerts"
 
 // Driver Entry ve Unload
 NTSTATUS RegeditDriverEntry();

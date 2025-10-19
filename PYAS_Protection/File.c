@@ -3,7 +3,6 @@
 
 // globals
 PVOID g_CallBackHandle = NULL;
-#define SELF_DEFENSE_PIPE_NAME  L"\\??\\pipe\\self_defense_alerts"
 #define ALERT_POOL_TAG 'tlrA'
 
 typedef struct _ALERT_WORK_ITEM {
@@ -173,6 +172,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         L"\\Owlyshield Service\\owlyshield_ransom.exe",
         L"\\Owlyshield Service\\tensorflowlite_c.dll",
         L"\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
+        L"\\drivers\\MBRFilter.sys",
         L"\\sanctum\\app.exe",
         L"\\sanctum\\server.exe",
         L"\\sanctum\\um_engine.exe",
