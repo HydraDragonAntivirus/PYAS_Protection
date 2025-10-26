@@ -179,7 +179,8 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         L"\\sanctum\\elam_installer.exe",
         L"\\AppData\\Roaming\\Sanctum\\sanctum.dll",
         L"\\AppData\\Roaming\\Sanctum\\sanctum.sys",
-        L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe"
+        L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe",
+        L"\\exluced\\excluded_rules.txt"
     };
 
     for (ULONG i = 0; i < ARRAYSIZE(protectedPatterns); ++i) {
