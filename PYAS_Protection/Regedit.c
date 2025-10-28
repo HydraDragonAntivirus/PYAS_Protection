@@ -377,7 +377,7 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                         RtlAppendUnicodeStringToString(&RegPath, pInfo->ValueName);
                     }
 
-                    // --- Winlogon Shell whitelist (paste inside RegNtPreSetValueKey case) ---
+                    // --- Winlogon Shell whitelist (fixed: check RtlUpcaseUnicodeString result) ---
                     {
                         // pInfo must be treated as PREG_SET_VALUE_KEY_INFORMATION in this case
                         PREG_SET_VALUE_KEY_INFORMATION pSet = (PREG_SET_VALUE_KEY_INFORMATION)Argument2;
@@ -411,72 +411,74 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                                     UNICODE_STRING candidate;
                                     RtlInitUnicodeString(&candidate, tmpBuf);
 
-                                    // Uppercase it for case-insensitive final-component comparison
+                                    // Upcase and *only if successful* use candidateUp.Buffer
                                     UNICODE_STRING candidateUp = { 0 };
-                                    if (!NT_SUCCESS(RtlUpcaseUnicodeString(&candidateUp, &candidate, TRUE)))
+                                    NTSTATUS upStatus = RtlUpcaseUnicodeString(&candidateUp, &candidate, TRUE);
+                                    if (!NT_SUCCESS(upStatus))
                                     {
+                                        // conservative deny if upcase fails
                                         QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_UPCASE_FAIL");
                                         Status = STATUS_ACCESS_DENIED;
-                                        goto End;
+                                        // no candidateUp to free, continue to cleanup/return
                                     }
-
-                                    // Trim whitespace and surrounding quotes
-                                    PWCHAR buf = candidateUp.Buffer;
-                                    LONG len = (LONG)(candidateUp.Length / sizeof(WCHAR));
-                                    LONG start = 0, end = len - 1;
-                                    while (start <= end && (buf[start] == L' ' || buf[start] == L'\t' || buf[start] == L'\r' || buf[start] == L'\n')) start++;
-                                    while (end >= start && (buf[end] == L' ' || buf[end] == L'\t' || buf[end] == L'\r' || buf[end] == L'\n')) end--;
-                                    if (end - start >= 1 && ((buf[start] == L'\"' && buf[end] == L'\"') || (buf[start] == L'\'' && buf[end] == L'\'')))
+                                    else
                                     {
-                                        start++; end--;
-                                    }
+                                        // Now it's safe to use candidateUp.Buffer
+                                        PWCHAR buf = candidateUp.Buffer;
+                                        LONG len = (LONG)(candidateUp.Length / sizeof(WCHAR));
+                                        LONG start = 0, end = len - 1;
 
-                                    if (end < start)
-                                    {
-                                        // empty after trimming -> deny
-                                        QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_EMPTY");
-                                        RtlFreeUnicodeString(&candidateUp);
-                                        Status = STATUS_ACCESS_DENIED;
-                                        goto End;
-                                    }
-
-                                    // Find last path separator, then compare final component to EXPLORER.EXE
-                                    LONG lastSep = -1;
-                                    for (LONG i = end; i >= start; --i)
-                                    {
-                                        if (buf[i] == L'\\' || buf[i] == L'/') { lastSep = i; break; }
-                                    }
-                                    LONG fnameStart = (lastSep >= start) ? lastSep + 1 : start;
-                                    ULONG fnameLen = (ULONG)(end - fnameStart + 1);
-                                    const WCHAR ALLOWED[] = L"EXPLORER.EXE";
-                                    ULONG allowedLen = (ULONG)wcslen(ALLOWED);
-
-                                    BOOLEAN ok = FALSE;
-                                    if (fnameLen == allowedLen)
-                                    {
-                                        ok = TRUE;
-                                        for (ULONG i = 0; i < allowedLen; ++i)
+                                        while (start <= end && (buf[start] == L' ' || buf[start] == L'\t' || buf[start] == L'\r' || buf[start] == L'\n')) start++;
+                                        while (end >= start && (buf[end] == L' ' || buf[end] == L'\t' || buf[end] == L'\r' || buf[end] == L'\n')) end--;
+                                        if (end - start >= 1 && ((buf[start] == L'\"' && buf[end] == L'\"') || (buf[start] == L'\'' && buf[end] == L'\'')))
                                         {
-                                            if (buf[fnameStart + i] != ALLOWED[i]) { ok = FALSE; break; }
+                                            start++; end--;
                                         }
-                                    }
 
-                                    RtlFreeUnicodeString(&candidateUp);
+                                        if (end < start)
+                                        {
+                                            QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_EMPTY");
+                                            RtlFreeUnicodeString(&candidateUp);
+                                            Status = STATUS_ACCESS_DENIED;
+                                        }
+                                        else
+                                        {
+                                            LONG lastSep = -1;
+                                            for (LONG i = end; i >= start; --i)
+                                            {
+                                                if (buf[i] == L'\\' || buf[i] == L'/') { lastSep = i; break; }
+                                            }
+                                            LONG fnameStart = (lastSep >= start) ? lastSep + 1 : start;
+                                            ULONG fnameLen = (ULONG)(end - fnameStart + 1);
+                                            const WCHAR ALLOWED[] = L"EXPLORER.EXE";
+                                            ULONG allowedLen = (ULONG)wcslen(ALLOWED);
 
-                                    if (!ok)
-                                    {
-                                        QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_INVALID");
-                                        Status = STATUS_ACCESS_DENIED;
-                                        goto End;
-                                    }
-                                    // else: allowed -> do nothing (permit write)
+                                            BOOLEAN ok = FALSE;
+                                            if (fnameLen == allowedLen)
+                                            {
+                                                ok = TRUE;
+                                                for (ULONG i = 0; i < allowedLen; ++i)
+                                                {
+                                                    if (buf[fnameStart + i] != ALLOWED[i]) { ok = FALSE; break; }
+                                                }
+                                            }
+
+                                            RtlFreeUnicodeString(&candidateUp);
+
+                                            if (!ok)
+                                            {
+                                                QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_INVALID");
+                                                Status = STATUS_ACCESS_DENIED;
+                                            }
+                                            // else allowed -> do nothing (permit write)
+                                        }
+                                    } // end else upcase success
                                 }
                                 else
                                 {
                                     // No data or too large -> conservative deny
                                     QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_BAD_SIZE");
                                     Status = STATUS_ACCESS_DENIED;
-                                    goto End;
                                 }
                             } // end if Winlogon Shell
                         } // end if pSet & GetNameForRegistryObject
