@@ -181,7 +181,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         L"\\AppData\\Roaming\\Sanctum\\sanctum.sys",
         L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe",
         L"\\exluced\\excluded_rules.txt"
-        L"\\Windows\\explorer.exe" // There is a low chance that malware might have already infected the system's explorer.exe
+        L"\\Windows\\explorer.exe" // Very small chance explorer.exe itself is compromised; terminating it may be harmless in some cases
     };
 
     for (ULONG i = 0; i < ARRAYSIZE(protectedPatterns); ++i) {
