@@ -1,9 +1,17 @@
 #pragma once
 
 #include <ntifs.h>
+#include <ntstrsafe.h>
 
 #define REG_TAG 'gkER'
-#define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OWLYSHIELD"
+#define REG_PROTECT_SUBPATH L"\\SOFTWARE\\OwlyShield"
+#define REG_PROTECT_KEY L"\\Services\\HydraDragonAntivirus"
+#define REG_PROTECT_PYAS L"\\Services\\SimplePYASProtection"
+#define REG_PROTECT_OWLY L"\\Services\\owlyshield_ransom"
+#define REG_PROTECT_SANCTUM L"\\Services\\sanctum_ppl_runner"
+#define REG_PROTECT_MBRFILTER L"\\Services\\MBRFilterB"
+
+#define REG_TAG 'gkER'
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\Global\\self_defense_alerts"
 
 // Driver Entry ve Unload
