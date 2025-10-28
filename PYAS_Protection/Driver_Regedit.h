@@ -9,7 +9,8 @@
 #define REG_PROTECT_PYAS L"\\Services\\SimplePYASProtection"
 #define REG_PROTECT_OWLY L"\\Services\\owlyshield_ransom"
 #define REG_PROTECT_SANCTUM L"\\Services\\sanctum_ppl_runner"
-#define REG_PROTECT_MBRFILTER L"\\Services\\MBRFilterB"
+#define REG_PROTECT_MBRFILTER L"\\Services\\MBRFilter"
+#define REG_PROTECT_WINLOGON L"\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
 
 #define REG_TAG 'gkER'
 #define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\Global\\self_defense_alerts"
