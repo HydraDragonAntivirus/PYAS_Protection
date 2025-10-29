@@ -377,112 +377,6 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                         RtlAppendUnicodeStringToString(&RegPath, pInfo->ValueName);
                     }
 
-                    // --- Winlogon Shell whitelist (fixed: check RtlUpcaseUnicodeString result) ---
-                    {
-                        // pInfo must be treated as PREG_SET_VALUE_KEY_INFORMATION in this case
-                        PREG_SET_VALUE_KEY_INFORMATION pSet = (PREG_SET_VALUE_KEY_INFORMATION)Argument2;
-
-                        if (pSet && pSet->Object && GetNameForRegistryObject(&RegPath, pSet->Object))
-                        {
-                            // Append value name for clarity (if present)
-                            if (pSet->ValueName && pSet->ValueName->Length > 0)
-                            {
-                                RtlAppendUnicodeToString(&RegPath, L"\\");
-                                RtlAppendUnicodeStringToString(&RegPath, pSet->ValueName);
-                            }
-
-                            // Only proceed if this is the Winlogon\Shell value
-                            UNICODE_STRING uShell;
-                            RtlInitUnicodeString(&uShell, L"Shell");
-
-                            if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_WINLOGON) &&
-                                pSet->ValueName &&
-                                RtlEqualUnicodeString(pSet->ValueName, &uShell, TRUE) &&
-                                (pSet->Type == REG_SZ || pSet->Type == REG_EXPAND_SZ))
-                            {
-                                // Basic sanity on incoming buffer
-                                ULONG dataSize = (ULONG)pSet->DataSize;
-                                if (pSet->Data && dataSize > 0 && dataSize < (260 * sizeof(WCHAR)))
-                                {
-                                    // Safe local copy and null-terminate
-                                    WCHAR tmpBuf[260] = { 0 };
-                                    RtlCopyMemory(tmpBuf, pSet->Data, min(dataSize, sizeof(tmpBuf) - sizeof(WCHAR)));
-
-                                    UNICODE_STRING candidate;
-                                    RtlInitUnicodeString(&candidate, tmpBuf);
-
-                                    // Upcase and *only if successful* use candidateUp.Buffer
-                                    UNICODE_STRING candidateUp = { 0 };
-                                    NTSTATUS upStatus = RtlUpcaseUnicodeString(&candidateUp, &candidate, TRUE);
-                                    if (!NT_SUCCESS(upStatus))
-                                    {
-                                        // conservative deny if upcase fails
-                                        QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_UPCASE_FAIL");
-                                        Status = STATUS_ACCESS_DENIED;
-                                        // no candidateUp to free, continue to cleanup/return
-                                    }
-                                    else
-                                    {
-                                        // Now it's safe to use candidateUp.Buffer
-                                        PWCHAR buf = candidateUp.Buffer;
-                                        LONG len = (LONG)(candidateUp.Length / sizeof(WCHAR));
-                                        LONG start = 0, end = len - 1;
-
-                                        while (start <= end && (buf[start] == L' ' || buf[start] == L'\t' || buf[start] == L'\r' || buf[start] == L'\n')) start++;
-                                        while (end >= start && (buf[end] == L' ' || buf[end] == L'\t' || buf[end] == L'\r' || buf[end] == L'\n')) end--;
-                                        if (end - start >= 1 && ((buf[start] == L'\"' && buf[end] == L'\"') || (buf[start] == L'\'' && buf[end] == L'\'')))
-                                        {
-                                            start++; end--;
-                                        }
-
-                                        if (end < start)
-                                        {
-                                            QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_EMPTY");
-                                            RtlFreeUnicodeString(&candidateUp);
-                                            Status = STATUS_ACCESS_DENIED;
-                                        }
-                                        else
-                                        {
-                                            LONG lastSep = -1;
-                                            for (LONG i = end; i >= start; --i)
-                                            {
-                                                if (buf[i] == L'\\' || buf[i] == L'/') { lastSep = i; break; }
-                                            }
-                                            LONG fnameStart = (lastSep >= start) ? lastSep + 1 : start;
-                                            ULONG fnameLen = (ULONG)(end - fnameStart + 1);
-                                            const WCHAR ALLOWED[] = L"EXPLORER.EXE";
-                                            ULONG allowedLen = (ULONG)wcslen(ALLOWED);
-
-                                            BOOLEAN ok = FALSE;
-                                            if (fnameLen == allowedLen)
-                                            {
-                                                ok = TRUE;
-                                                for (ULONG i = 0; i < allowedLen; ++i)
-                                                {
-                                                    if (buf[fnameStart + i] != ALLOWED[i]) { ok = FALSE; break; }
-                                                }
-                                            }
-
-                                            RtlFreeUnicodeString(&candidateUp);
-
-                                            if (!ok)
-                                            {
-                                                QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_INVALID");
-                                                Status = STATUS_ACCESS_DENIED;
-                                            }
-                                            // else allowed -> do nothing (permit write)
-                                        }
-                                    } // end else upcase success
-                                }
-                                else
-                                {
-                                    // No data or too large -> conservative deny
-                                    QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_BAD_SIZE");
-                                    Status = STATUS_ACCESS_DENIED;
-                                }
-                            } // end if Winlogon Shell
-                        } // end if pSet & GetNameForRegistryObject
-                    }
                     // --- end Winlogon Shell whitelist ---
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
@@ -536,6 +430,108 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                         RtlAppendUnicodeStringToString(&RegPath, pInfo->ValueName);
                     }
 
+                    // --- Winlogon Shell whitelist (BUGFIX: MOVED HERE AND CORRECTED) ---
+                    {
+                        // Only proceed if this is the Winlogon\Shell value
+                        UNICODE_STRING uShell;
+                        RtlInitUnicodeString(&uShell, L"Shell");
+
+                        if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_WINLOGON) &&
+                            pInfo->ValueName &&
+                            RtlEqualUnicodeString(pInfo->ValueName, &uShell, TRUE) &&
+                            (pInfo->Type == REG_SZ || pInfo->Type == REG_EXPAND_SZ))
+                        {
+                            // Basic sanity on incoming buffer
+                            ULONG dataSize = (ULONG)pInfo->DataSize;
+                            if (pInfo->Data && dataSize > 0 && dataSize < (260 * sizeof(WCHAR)))
+                            {
+                                // Safe local copy and null-terminate
+                                WCHAR tmpBuf[260] = { 0 };
+                                RtlCopyMemory(tmpBuf, pInfo->Data, min(dataSize, sizeof(tmpBuf) - sizeof(WCHAR)));
+
+                                UNICODE_STRING candidate;
+                                RtlInitUnicodeString(&candidate, tmpBuf);
+
+                                // Upcase and *only if successful* use candidateUp.Buffer
+                                UNICODE_STRING candidateUp = { 0 };
+                                NTSTATUS upStatus = RtlUpcaseUnicodeString(&candidateUp, &candidate, TRUE);
+                                if (!NT_SUCCESS(upStatus))
+                                {
+                                    // conservative deny if upcase fails
+                                    QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_UPCASE_FAIL");
+                                    Status = STATUS_ACCESS_DENIED;
+                                }
+                                else
+                                {
+                                    // Now it's safe to use candidateUp.Buffer
+                                    PWCHAR buf = candidateUp.Buffer;
+                                    LONG len = (LONG)(candidateUp.Length / sizeof(WCHAR));
+                                    LONG start = 0, end = len - 1;
+
+                                    while (start <= end && (buf[start] == L' ' || buf[start] == L'\t' || buf[start] == L'\r' || buf[start] == L'\n')) start++;
+                                    while (end >= start && (buf[end] == L' ' || buf[end] == L'\t' || buf[end] == L'\r' || buf[end] == L'\n')) end--;
+                                    if (end - start >= 1 && ((buf[start] == L'\"' && buf[end] == L'\"') || (buf[start] == L'\'' && buf[end] == L'\'')))
+                                    {
+                                        start++; end--;
+                                    }
+
+                                    if (end < start)
+                                    {
+                                        QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_EMPTY");
+                                        RtlFreeUnicodeString(&candidateUp);
+                                        Status = STATUS_ACCESS_DENIED;
+                                    }
+                                    else
+                                    {
+                                        LONG lastSep = -1;
+                                        for (LONG i = end; i >= start; --i)
+                                        {
+                                            if (buf[i] == L'\\' || buf[i] == L'/') { lastSep = i; break; }
+                                        }
+                                        LONG fnameStart = (lastSep >= start) ? lastSep + 1 : start;
+                                        ULONG fnameLen = (ULONG)(end - fnameStart + 1);
+                                        const WCHAR ALLOWED[] = L"EXPLORER.EXE";
+                                        ULONG allowedLen = (ULONG)wcslen(ALLOWED);
+
+                                        BOOLEAN ok = FALSE;
+                                        if (fnameLen == allowedLen)
+                                        {
+                                            ok = TRUE;
+                                            for (ULONG i = 0; i < allowedLen; ++i)
+                                            {
+                                                if (buf[fnameStart + i] != ALLOWED[i]) { ok = FALSE; break; }
+                                            }
+                                        }
+
+                                        RtlFreeUnicodeString(&candidateUp);
+
+                                        if (!ok)
+                                        {
+                                            QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_INVALID");
+                                            Status = STATUS_ACCESS_DENIED;
+                                        }
+                                        else
+                                        {
+                                            // Whitelist succeeded.
+                                            // We must skip the other checks for this key.
+                                            // We can safely leave the __try block.
+                                            __leave;
+                                        }
+                                    }
+                                } // end else upcase success
+                            }
+                            else
+                            {
+                                // No data or too large -> conservative deny
+                                QueueRegistryAlertToUserMode(&RegPath, L"SET_VALUE_TAMPERING_WINLOGON_SHELL_BAD_SIZE");
+                                Status = STATUS_ACCESS_DENIED;
+                            }
+                        } // end if Winlogon Shell
+                    }
+                    // --- end Winlogon Shell whitelist ---
+
+
+                    // Standard hardcoded checks
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
