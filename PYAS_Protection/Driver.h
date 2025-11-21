@@ -68,3 +68,6 @@ NTSTATUS FileDriverEntry();
 VOID FileUnloadDriver();
 NTSTATUS RegeditDriverEntry();
 NTSTATUS RegeditUnloadDriver();
+
+// Shared alert helper
+NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength);

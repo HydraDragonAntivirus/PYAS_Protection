@@ -495,45 +495,10 @@ VOID ProcessAlertWorker(PVOID Context)
 {
     PPROCESS_ALERT_WORK_ITEM workItem = (PPROCESS_ALERT_WORK_ITEM)Context;
     NTSTATUS status;
-    HANDLE pipeHandle = NULL;
-    IO_STATUS_BLOCK ioStatusBlock;
-    OBJECT_ATTRIBUTES objAttr;
-    UNICODE_STRING pipeName;
     WCHAR messageBuffer[2048];
 
     if (!workItem)
         return;
-
-    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
-
-    InitializeObjectAttributes(
-        &objAttr,
-        &pipeName,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-        NULL,
-        NULL
-    );
-
-    // Open pipe
-    status = ZwCreateFile(
-        &pipeHandle,
-        FILE_WRITE_DATA | SYNCHRONIZE,
-        &objAttr,
-        &ioStatusBlock,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        0,
-        FILE_OPEN,
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-        NULL,
-        0
-    );
-
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrint("[Process-Protection] Failed to open user pipe: 0x%X\r\n", status);
-        goto Cleanup;
-    }
 
     PCWSTR targetName = workItem->TargetPath.Buffer ? workItem->TargetPath.Buffer : L"Unknown";
     PCWSTR attackerName = workItem->AttackerPath.Buffer ? workItem->AttackerPath.Buffer : L"Unknown";
@@ -551,36 +516,21 @@ VOID ProcessAlertWorker(PVOID Context)
         (unsigned long long)(ULONG_PTR)workItem->TargetPid
     );
 
-    if (!NT_SUCCESS(status))
+    if (NT_SUCCESS(status))
     {
-        DbgPrint("[Process-Protection] Failed to format alert message: 0x%X\r\n", status);
-        ZwClose(pipeHandle);
-        goto Cleanup;
+        SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
+        status = SendAlertToPipe(messageBuffer, messageLength);
+
+        if (!NT_SUCCESS(status))
+        {
+            DbgPrint("[Process-Protection] Failed to send alert: 0x%X\r\n", status);
+        }
+    }
+    else
+    {
+        DbgPrint("[Process-Protection] Failed to format alert: 0x%X\r\n", status);
     }
 
-    SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
-
-    // Write to pipe
-    status = ZwWriteFile(
-        pipeHandle,
-        NULL,
-        NULL,
-        NULL,
-        &ioStatusBlock,
-        messageBuffer,
-        (ULONG)messageLength,
-        NULL,
-        NULL
-    );
-
-    ZwClose(pipeHandle);
-
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrint("[Process-Protection] ZwWriteFile failed: 0x%X\r\n", status);
-    }
-
-Cleanup:
     // Free allocated strings
     if (workItem->TargetPath.Buffer)
         ExFreePool(workItem->TargetPath.Buffer);

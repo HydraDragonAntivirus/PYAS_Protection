@@ -279,59 +279,36 @@ VOID SendAlertWorker(PVOID Context)
     PALERT_WORK_ITEM workItem = (PALERT_WORK_ITEM)Context;
     if (!workItem) return;
 
-    UNICODE_STRING pipeName;
-    OBJECT_ATTRIBUTES objAttr;
-    IO_STATUS_BLOCK iosb;
-    HANDLE pipeHandle = NULL;
     WCHAR messageBuffer[2048];
 
-    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
-    InitializeObjectAttributes(&objAttr, &pipeName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    PCWSTR protectedName = (workItem->ProtectedFile.Buffer) ? workItem->ProtectedFile.Buffer : L"Unknown";
+    PCWSTR attackerPath = (workItem->AttackingProcessPath.Buffer) ? workItem->AttackingProcessPath.Buffer : L"Unknown";
 
-    NTSTATUS st = ZwCreateFile(&pipeHandle,
-        FILE_WRITE_DATA | SYNCHRONIZE,
-        &objAttr,
-        &iosb,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        0,
-        FILE_OPEN,
-        FILE_SYNCHRONOUS_IO_NONALERT,
-        NULL,
-        0);
+    NTSTATUS status = RtlStringCchPrintfW(messageBuffer, RTL_NUMBER_OF(messageBuffer),
+        L"{\"protected_file\":\"%ws\",\"attacker_path\":\"%ws\",\"attacker_pid\":%p,\"attack_type\":\"%ws\"}",
+        protectedName, attackerPath, workItem->AttackingPid, workItem->AttackType);
 
-    if (!NT_SUCCESS(st)) {
-        DbgPrint("[SELF-DEFENSE] SendAlertWorker: pipe open failed 0x%X\n", st);
+    if (NT_SUCCESS(status))
+    {
+        SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
+        status = SendAlertToPipe(messageBuffer, messageLength);
+
+        if (!NT_SUCCESS(status))
+        {
+            DbgPrint("[SELF-DEFENSE] Failed to send alert: 0x%X\n", status);
+        }
     }
-    else {
-        PCWSTR protectedName = (workItem->ProtectedFile.Buffer) ? workItem->ProtectedFile.Buffer : L"Unknown";
-        PCWSTR attackerPath = (workItem->AttackingProcessPath.Buffer) ? workItem->AttackingProcessPath.Buffer : L"Unknown";
-
-        NTSTATUS fmt = RtlStringCchPrintfW(messageBuffer, RTL_NUMBER_OF(messageBuffer),
-            L"{\"protected_file\":\"%ws\",\"attacker_path\":\"%ws\",\"attacker_pid\":%p,\"attack_type\":\"%ws\"}",
-            protectedName, attackerPath, workItem->AttackingPid, workItem->AttackType);
-
-        if (NT_SUCCESS(fmt)) {
-            SIZE_T bytes = (wcslen(messageBuffer) + 1) * sizeof(WCHAR);
-            NTSTATUS wst = ZwWriteFile(pipeHandle, NULL, NULL, NULL, &iosb, messageBuffer, (ULONG)bytes, NULL, NULL);
-            if (!NT_SUCCESS(wst)) {
-                DbgPrint("[SELF-DEFENSE] ZwWriteFile failed: 0x%X\n", wst);
-            }
-            else {
-                DbgPrint("[SELF-DEFENSE] Alert sent: %ws\n", messageBuffer);
-            }
-        }
-        else {
-            DbgPrint("[SELF-DEFENSE] Message format failed: 0x%X\n", fmt);
-        }
-
-        ZwClose(pipeHandle);
+    else
+    {
+        DbgPrint("[SELF-DEFENSE] Failed to format alert: 0x%X\n", status);
     }
 
-    if (workItem->ProtectedFile.Buffer) {
+    if (workItem->ProtectedFile.Buffer)
+    {
         ExFreePoolWithTag(workItem->ProtectedFile.Buffer, ALERT_POOL_TAG);
     }
-    if (workItem->AttackingProcessPath.Buffer) {
+    if (workItem->AttackingProcessPath.Buffer)
+    {
         ExFreePoolWithTag(workItem->AttackingProcessPath.Buffer, ALERT_POOL_TAG);
     }
 

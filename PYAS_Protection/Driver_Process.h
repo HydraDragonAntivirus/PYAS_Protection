@@ -39,7 +39,6 @@
 // --- Constants ---
 //
 
-#define SELF_DEFENSE_PIPE_NAME L"\\Device\\NamedPipe\\Global\\self_defense_alerts"
 #define PID_LIST_TAG 'diPP' // Pool tag for our PID list allocations
 
 // Safe access rights for blocked processes/threads

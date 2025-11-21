@@ -58,42 +58,8 @@ VOID RegistryAlertWorker(PVOID Context)
 {
     PREGISTRY_ALERT_WORK_ITEM workItem = (PREGISTRY_ALERT_WORK_ITEM)Context;
     NTSTATUS status;
-    HANDLE pipeHandle = NULL;
-    IO_STATUS_BLOCK ioStatusBlock;
-    OBJECT_ATTRIBUTES objAttr;
-    UNICODE_STRING pipeName;
     WCHAR messageBuffer[2048];
     WCHAR escapedRegPath[1024];
-
-    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
-
-    InitializeObjectAttributes(
-        &objAttr,
-        &pipeName,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-        NULL,
-        NULL
-    );
-
-    // Open pipe
-    status = ZwCreateFile(
-        &pipeHandle,
-        FILE_WRITE_DATA | SYNCHRONIZE,
-        &objAttr,
-        &ioStatusBlock,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        0,
-        FILE_OPEN,
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-        NULL,
-        0
-    );
-
-    if (!NT_SUCCESS(status))
-    {
-        goto Cleanup;
-    }
 
     PCWSTR attackerName = workItem->AttackerPath.Buffer ? workItem->AttackerPath.Buffer : L"Unknown";
 
@@ -132,39 +98,28 @@ VOID RegistryAlertWorker(PVOID Context)
         workItem->Operation
     );
 
-    if (!NT_SUCCESS(status))
-    {
-        ZwClose(pipeHandle);
-        goto Cleanup;
-    }
-
-    SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
-
-    // Write to pipe
-    status = ZwWriteFile(
-        pipeHandle,
-        NULL,
-        NULL,
-        NULL,
-        &ioStatusBlock,
-        messageBuffer,
-        (ULONG)messageLength,
-        NULL,
-        NULL
-    );
-
-    ZwClose(pipeHandle);
-
     if (NT_SUCCESS(status))
     {
-        // FIXED: Changed format specifier for Operation from %s to %ws to correctly print a wide character string.
-        DbgPrint("[Registry-Protection] Alert sent: PID %llu attempted %ws on %wZ\r\n",
-            (ULONGLONG)(ULONG_PTR)workItem->AttackerPid,
-            workItem->Operation,
-            &workItem->RegPath);
+        SIZE_T messageLength = wcslen(messageBuffer) * sizeof(WCHAR);
+        status = SendAlertToPipe(messageBuffer, messageLength);
+
+        if (NT_SUCCESS(status))
+        {
+            DbgPrint("[Registry-Protection] Alert sent: PID %llu attempted %ws on %wZ\r\n",
+                (ULONGLONG)(ULONG_PTR)workItem->AttackerPid,
+                workItem->Operation,
+                &workItem->RegPath);
+        }
+        else
+        {
+            DbgPrint("[Registry-Protection] Failed to send alert: 0x%X\r\n", status);
+        }
+    }
+    else
+    {
+        DbgPrint("[Registry-Protection] Failed to format alert: 0x%X\r\n", status);
     }
 
-Cleanup:
     // Free allocated strings
     if (workItem->RegPath.Buffer)
         ExFreePoolWithTag(workItem->RegPath.Buffer, REG_TAG);

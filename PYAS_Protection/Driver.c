@@ -1,5 +1,61 @@
 #include "Driver.h"
 
+#define SELF_DEFENSE_PIPE_NAME L"\\Device\\NamedPipe\\Global\\self_defense_alerts"
+
+// Shared pipe alert function
+NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength)
+{
+    HANDLE pipeHandle = NULL;
+    IO_STATUS_BLOCK ioStatusBlock;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING pipeName;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
+
+    InitializeObjectAttributes(
+        &objAttr,
+        &pipeName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    status = ZwCreateFile(
+        &pipeHandle,
+        FILE_WRITE_DATA | SYNCHRONIZE,
+        &objAttr,
+        &ioStatusBlock,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+
+    status = ZwWriteFile(
+        pipeHandle,
+        NULL,
+        NULL,
+        NULL,
+        &ioStatusBlock,
+        (PVOID)Message,
+        (ULONG)MessageLength,
+        NULL,
+        NULL
+    );
+
+    ZwClose(pipeHandle);
+    return status;
+}
+
 // Bypass driver signature enforcement
 BOOLEAN BypassCheckSign(PDRIVER_OBJECT pDriverObject)
 {
