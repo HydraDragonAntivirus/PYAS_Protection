@@ -1,6 +1,7 @@
 // Process.c - Process & Thread protection with PID tracking and system process whitelist
 #include <ntifs.h>
 #include <ntstrsafe.h>
+#include "Driver.h"
 #include "Driver_Process.h"
 
 //

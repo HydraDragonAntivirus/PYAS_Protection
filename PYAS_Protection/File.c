@@ -1,4 +1,5 @@
 // File.c - Self-Defense Protection with User-Mode Alerting (uses CXX_FileProtectX64.h
+#include "Driver.h"
 #include "Driver_File.h"   // your header with OBJECT_TYPE_TEMP and related typedefs
 
 // globals

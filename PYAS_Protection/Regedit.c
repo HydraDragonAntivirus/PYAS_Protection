@@ -1,4 +1,5 @@
 ﻿// Regedit.c - Registry protection with user-mode alerting (FIXED)
+#include "Driver.h"
 #include "Driver_Regedit.h"
 
 LARGE_INTEGER Cookie;
