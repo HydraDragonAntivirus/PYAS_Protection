@@ -13,7 +13,7 @@
 #define REG_PROTECT_WINLOGON L"\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
 
 #define REG_TAG 'gkER'
-#define SELF_DEFENSE_PIPE_NAME L"\\??\\pipe\\Global\\self_defense_alerts"
+#define SELF_DEFENSE_PIPE_NAME L"\\Device\\NamedPipe\\Global\\self_defense_alerts"
 
 // Driver Entry ve Unload
 NTSTATUS RegeditDriverEntry();
