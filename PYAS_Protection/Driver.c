@@ -2,7 +2,11 @@
 
 #define SELF_DEFENSE_PIPE_NAME L"\\Device\\NamedPipe\\Global\\self_defense_alerts"
 
-// Shared pipe alert function
+// Track if pipe is available (to avoid log spam)
+static BOOLEAN g_PipeAvailable = FALSE;
+static BOOLEAN g_PipeUnavailableLogged = FALSE;
+
+// Shared pipe alert function with retry logic
 NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength)
 {
     HANDLE pipeHandle = NULL;
@@ -10,6 +14,9 @@ NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength)
     OBJECT_ATTRIBUTES objAttr;
     UNICODE_STRING pipeName;
     NTSTATUS status;
+    LARGE_INTEGER delay;
+    const ULONG MAX_RETRIES = 180;  // Retry for 3 minutes (180 seconds) for slow Python startup
+    ULONG attempt;
 
     RtlInitUnicodeString(&pipeName, SELF_DEFENSE_PIPE_NAME);
 
@@ -21,39 +28,84 @@ NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength)
         NULL
     );
 
-    status = ZwCreateFile(
-        &pipeHandle,
-        FILE_WRITE_DATA | SYNCHRONIZE,
-        &objAttr,
-        &ioStatusBlock,
-        NULL,
-        FILE_ATTRIBUTE_NORMAL,
-        0,
-        FILE_OPEN,
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-        NULL,
-        0
-    );
-
-    if (!NT_SUCCESS(status))
+    // Retry loop to handle startup race condition (kernel starts before Python)
+    for (attempt = 0; attempt < MAX_RETRIES; attempt++)
     {
-        return status;
+        status = ZwCreateFile(
+            &pipeHandle,
+            FILE_WRITE_DATA | SYNCHRONIZE,
+            &objAttr,
+            &ioStatusBlock,
+            NULL,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+            NULL,
+            0
+        );
+
+        if (NT_SUCCESS(status))
+        {
+            // Log once when pipe becomes available
+            if (!g_PipeAvailable)
+            {
+                DbgPrint("[SendAlertToPipe] Pipe connection established to user-mode listener\r\n");
+                g_PipeAvailable = TRUE;
+                g_PipeUnavailableLogged = FALSE;
+            }
+
+            // Successfully opened pipe, now write the alert
+            status = ZwWriteFile(
+                pipeHandle,
+                NULL,
+                NULL,
+                NULL,
+                &ioStatusBlock,
+                (PVOID)Message,
+                (ULONG)MessageLength,
+                NULL,
+                NULL
+            );
+
+            ZwClose(pipeHandle);
+            return status;
+        }
+
+        // If pipe doesn't exist or is unavailable, retry after a short delay
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_PIPE_NOT_AVAILABLE)
+        {
+            // Only retry if not the last attempt
+            if (attempt < MAX_RETRIES - 1)
+            {
+                // Wait 1 second before retrying (negative = relative time, units of 100ns)
+                // Python startup can be slow, so we give it plenty of time
+                delay.QuadPart = -1000LL * 10000LL;  // 1000ms = 1 second
+                KeDelayExecutionThread(KernelMode, FALSE, &delay);
+                continue;
+            }
+            else
+            {
+                // Last attempt failed, log once and silently drop further alerts
+                // This is expected during system startup before Python initializes
+                if (!g_PipeUnavailableLogged)
+                {
+                    DbgPrint("[SendAlertToPipe] Unable to connect to user-mode listener after %d retries - alerts will be dropped until pipe is available\r\n", MAX_RETRIES);
+                    g_PipeUnavailableLogged = TRUE;
+                    g_PipeAvailable = FALSE;
+                }
+                return STATUS_SUCCESS;
+            }
+        }
+        else
+        {
+            // Some other error (not pipe-related), return immediately
+            return status;
+        }
     }
 
-    status = ZwWriteFile(
-        pipeHandle,
-        NULL,
-        NULL,
-        NULL,
-        &ioStatusBlock,
-        (PVOID)Message,
-        (ULONG)MessageLength,
-        NULL,
-        NULL
-    );
-
-    ZwClose(pipeHandle);
-    return status;
+    // Should never reach here, but return success to avoid error spam
+    return STATUS_SUCCESS;
 }
 
 // Bypass driver signature enforcement
