@@ -131,6 +131,22 @@ BOOLEAN GetFileDosName(PFILE_OBJECT FileObject, POBJECT_NAME_INFORMATION* OutNam
 
     if (!FileObject || !OutNameInfo) return FALSE;
 
+    // BUGFIX: Avoid STATUS_OBJECT_NAME_NOT_FOUND by filtering out non-disk file objects
+    // Check if this is a special file object type (pipe, mailslot, device) that doesn't have a DOS device name
+    // These objects don't need protection checks since protected files are disk-based
+    if (FileObject->Flags & (FO_NAMED_PIPE | FO_MAILSLOT)) {
+        // This is a named pipe or mailslot - skip protection (not a disk file)
+        *OutNameInfo = NULL;
+        return FALSE;
+    }
+
+    // Check if the file object has a valid device object and FileName
+    // Objects without proper device/file associations can't be protected files
+    if (!FileObject->DeviceObject || !FileObject->FileName.Buffer || FileObject->FileName.Length == 0) {
+        *OutNameInfo = NULL;
+        return FALSE;
+    }
+
     st = IoQueryFileDosDeviceName(FileObject, &nameInfo);
     if (!NT_SUCCESS(st) || !nameInfo || !nameInfo->Name.Buffer || nameInfo->Name.Length == 0) {
         if (nameInfo) ExFreePool(nameInfo);
