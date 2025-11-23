@@ -73,7 +73,7 @@ NTSTATUS SendAlertToPipe(_In_ PCWSTR Message, _In_ SIZE_T MessageLength)
         }
 
         // If pipe doesn't exist or is unavailable, retry after a short delay
-        if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_PIPE_NOT_AVAILABLE)
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_PIPE_NOT_AVAILABLE || status == STATUS_PENDING)
         {
             // Only retry if not the last attempt
             if (attempt < MAX_RETRIES - 1)
