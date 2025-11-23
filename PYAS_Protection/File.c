@@ -188,7 +188,7 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
         L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.dll", // WARNING: Some antivirus programs (like Malwarebytes or Ikarus) may be unable to remove HydraDragon Antivirus and might mistakenly flag your system as infected because of it.
         L"Service\\owlyshield_ransom.exe",
         L"Service\\tensorflowlite_c.dll",
-        L"\\OwlyshieldRansomFilter\\OwlyshieldRansomFilter.sys",
+        L"\\drivers\\OwlyshieldRansomFilter.sys",
         L"\\drivers\\MBRFilter.sys",
         L"\\sanctum\\app.exe",
         L"\\sanctum\\server.exe",
