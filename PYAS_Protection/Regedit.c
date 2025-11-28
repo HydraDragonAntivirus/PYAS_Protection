@@ -336,7 +336,6 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                     // --- end Winlogon Shell whitelist ---
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM) ||
@@ -359,7 +358,6 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                 if (GetNameForRegistryObject(&RegPath, pInfo->Object))
                 {
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM) ||
@@ -489,7 +487,6 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
 
                     // Standard hardcoded checks
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM) ||
@@ -517,7 +514,6 @@ NTSTATUS RegistryCallback(_In_ PVOID CallbackContext, _In_ PVOID Argument1, _In_
                     }
 
                     if (UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SUBPATH) ||
-                        UnicodeContainsInsensitive(&RegPath, REG_PROTECT_KEY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_PYAS) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_OWLY) ||
                         UnicodeContainsInsensitive(&RegPath, REG_PROTECT_SANCTUM) ||
