@@ -40,12 +40,12 @@ SimplePYASProtection.sys
 
 ;-------------- Service installation --------------
 [SimplePYASProtection_Device.NT.Services]
-AddService = HydraDragonAntivirus,%SPSVCINST_ASSOCSERVICE%, HydraDragonAntivirus_Service_Inst
+AddService = SimplePYASProtection,%SPSVCINST_ASSOCSERVICE%, SimplePYASProtection_Service_Inst
 
-[HydraDragonAntivirus_Service_Inst]
-DisplayName = %HydraDragonAntivirus.SVCDESC%
+[SimplePYASProtection_Service_Inst]
+DisplayName = %SimplePYASProtection.SVCDESC%
 ServiceType = 1 ; SERVICE_KERNEL_DRIVER
-StartType = 3   ; SERVICE_DEMAND_START
+StartType = 1   ; SERVICE_SYSTEM_START
 ErrorControl = 1 ; SERVICE_ERROR_NORMAL
 ServiceBinary = %12%\SimplePYASProtection.sys
 
@@ -61,9 +61,9 @@ HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfC
 WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
 
 [SimplePYASProtection_Device.NT.Wdf]
-KmdfService = HydraDragonAntivirus, HydraDragonAntivirus_wdfsect
+KmdfService = SimplePYASProtection, SimplePYASProtection_wdfsect
 
-[HydraDragonAntivirus_wdfsect]
+[SimplePYASProtection_wdfsect]
 KmdfLibraryVersion = $KMDFVERSION$
 
 [Strings]
@@ -72,4 +72,4 @@ ManufacturerName="HydraDragon"
 ClassName="Samples"
 DiskName = "HydraDragonAntivirus Installation Disk"
 SimplePYASProtection.DeviceDesc = "HydraDragonAntivirus Device"
-HydraDragonAntivirus.SVCDESC = "HydraDragonAntivirus Kernel Driver"
+SimplePYASProtection.SVCDESC = "SimplePYASProtection Kernel Driver"
