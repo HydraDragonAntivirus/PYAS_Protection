@@ -1,5 +1,5 @@
 ; SimplePYASProtection.inf
-;
+; Legacy kernel driver installation
 
 [Version]
 Signature="$WINDOWS NT$"
@@ -12,35 +12,21 @@ PnpLockdown=1
 
 [DestinationDirs]
 DefaultDestDir = 12
-SimplePYASProtection_Device_CoInstaller_CopyFiles = 11
-
-; ================= Class section =====================
 
 [SourceDisksNames]
 1 = %DiskName%,,,""
 
 [SourceDisksFiles]
 SimplePYASProtection.sys = 1,,
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1
 
-;*****************************************
-; Install Section
-;*****************************************
-[Manufacturer]
-%ManufacturerName%=Standard,NTamd64
-
-[Standard.NTamd64]
-%SimplePYASProtection.DeviceDesc%=SimplePYASProtection_Device, Root\HydraDragonAntivirus
-
-[SimplePYASProtection_Device.NT]
+[DefaultInstall.NTamd64]
 CopyFiles=Drivers_Dir
+
+[DefaultInstall.NTamd64.Services]
+AddService = SimplePYASProtection,0x00000002, SimplePYASProtection_Service_Inst
 
 [Drivers_Dir]
 SimplePYASProtection.sys
-
-;-------------- Service installation --------------
-[SimplePYASProtection_Device.NT.Services]
-AddService = SimplePYASProtection,%SPSVCINST_ASSOCSERVICE%, SimplePYASProtection_Service_Inst
 
 [SimplePYASProtection_Service_Inst]
 DisplayName = %SimplePYASProtection.SVCDESC%
@@ -49,27 +35,7 @@ StartType = 1   ; SERVICE_SYSTEM_START
 ErrorControl = 1 ; SERVICE_ERROR_NORMAL
 ServiceBinary = %12%\SimplePYASProtection.sys
 
-;--- Device Coinstaller installation ---
-[SimplePYASProtection_Device.NT.CoInstallers]
-AddReg=SimplePYASProtection_Device_CoInstaller_AddReg
-CopyFiles=SimplePYASProtection_Device_CoInstaller_CopyFiles
-
-[SimplePYASProtection_Device_CoInstaller_AddReg]
-HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
-
-[SimplePYASProtection_Device_CoInstaller_CopyFiles]
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
-
-[SimplePYASProtection_Device.NT.Wdf]
-KmdfService = SimplePYASProtection, SimplePYASProtection_wdfsect
-
-[SimplePYASProtection_wdfsect]
-KmdfLibraryVersion = $KMDFVERSION$
-
 [Strings]
-SPSVCINST_ASSOCSERVICE= 0x00000002
-ManufacturerName="HydraDragon"
-ClassName="Samples"
-DiskName = "HydraDragonAntivirus Installation Disk"
-SimplePYASProtection.DeviceDesc = "HydraDragonAntivirus Device"
+ManufacturerName="SimplePYAS"
+DiskName = "SimplePYASProtection Installation Disk"
 SimplePYASProtection.SVCDESC = "SimplePYASProtection Kernel Driver"
