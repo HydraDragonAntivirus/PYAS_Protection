@@ -211,24 +211,33 @@ OB_PREOP_CALLBACK_STATUS preCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
-    // If it's a kernel handle, skip
+    // 1. Kernel Handle Check: Always allow kernel-mode requests first.
     if (pOperationInformation->KernelHandle)
         return OB_PREOP_SUCCESS;
 
     PEPROCESS currentProc = PsGetCurrentProcess();
+    PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
 
+    // 2. POINTER EQUALITY CHECK (CRITICAL FIX FOR STARTUP CRASH)
+    // Always allow a process to access itself.
+    // Check pointers first to avoid overhead and IsSystemProcess recursion risks.
+    if (currentProc == targetProc)
+        return OB_PREOP_SUCCESS;
+
+    HANDLE callerPid = PsGetProcessId(currentProc);
+    HANDLE targetPid = PsGetProcessId(targetProc);
+
+    // 3. PID EQUALITY CHECK
+    // Redundant but safe fallback for self-access.
+    if (callerPid == targetPid)
+        return OB_PREOP_SUCCESS;
+
+    // 4. SYSTEM PROCESS CHECK (Must be done WITHOUT opening handles!)
     // Allow Windows system processes full access to everything
+    // MOVED: Checked AFTER self-access to prevent recursion during init.
     if (IsSystemProcess(currentProc)) {
         return OB_PREOP_SUCCESS;
     }
-
-    HANDLE callerPid = PsGetProcessId(currentProc);
-    PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
-    HANDLE targetPid = PsGetProcessId(targetProc);
-
-    // Always allow self-access
-    if (callerPid == targetPid)
-        return OB_PREOP_SUCCESS;
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
@@ -268,15 +277,11 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 {
     UNREFERENCED_PARAMETER(RegistrationContext);
 
+    // 1. Kernel Handle Check
     if (pOperationInformation->KernelHandle)
         return OB_PREOP_SUCCESS;
 
     PEPROCESS currentProc = PsGetCurrentProcess();
-
-    // Allow Windows system processes full access to all threads
-    if (IsSystemProcess(currentProc)) {
-        return OB_PREOP_SUCCESS;
-    }
 
     HANDLE callerPid = PsGetProcessId(currentProc);
 
@@ -288,8 +293,15 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     HANDLE targetPid = PsGetProcessId(targetProc);
 
+    // 2. SELF-ACCESS CHECK (CRITICAL FIX)
+    // Must be done BEFORE IsSystemProcess to prevent recursion.
     if (callerPid == targetPid)
         return OB_PREOP_SUCCESS;
+
+    // 3. SYSTEM PROCESS CHECK
+    if (IsSystemProcess(currentProc)) {
+        return OB_PREOP_SUCCESS;
+    }
 
     BOOLEAN callerIsProtected = IsProtectedProcessByPid(callerPid);
     BOOLEAN targetIsProtected = IsProtectedProcessByPid(targetPid);
@@ -377,59 +389,29 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
     return result;
 }
 
-// Checks if a process is a System-level process by its Mandatory Integrity Level (System IL).
+// RECURSION FIX: Checks if a process is System.
+// CRITICAL CHANGE: Removed ObOpenObjectByPointer to prevent infinite recursion loop
+// inside ObRegisterCallbacks. Using Handles inside a pre-operation callback is strictly forbidden.
 BOOLEAN IsSystemProcess(PEPROCESS Process) {
-    // Explicit initialization of all locals to prevent 'lnt-uninitialized-local' warning.
-    HANDLE hProcess = NULL;
-    HANDLE hToken = NULL;
-    NTSTATUS status;
-    BOOLEAN isSystem = FALSE;
-    PTOKEN_MANDATORY_LABEL pLabel = NULL;
-    ULONG tokenInfoLength = 0;
+    HANDLE pid = PsGetProcessId(Process);
 
-    // 1. Get a handle to the process
-    status = ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, 0, *PsProcessType, KernelMode, &hProcess);
-    if (!NT_SUCCESS(status)) {
-        return FALSE;
+    // 1. Check for Standard System PIDs
+    // PID 4 is always the "System" process. PID 0 is Idle.
+    if (pid == (HANDLE)4 || pid == (HANDLE)0) {
+        return TRUE;
     }
 
-    // 2. Open the process token (ZwOpenProcessToken must be available via included headers)
-    status = ZwOpenProcessToken(hProcess, TOKEN_QUERY, &hToken);
-    // hProcess must be closed regardless of success
-    ZwClose(hProcess);
+    // 2. Note on checking Token Integrity Level (Recursive Danger):
+    // We cannot safely call ZwOpenProcessToken or ObOpenObjectByPointer here because
+    // it triggers the handle creation callback (preCall) again, leading to a stack overflow.
+    //
+    // If you need to whitelist other system services (like lsass.exe),
+    // do NOT do it here. Instead:
+    // a) Identify them in CreateProcessNotifyRoutine (where it is safe to open tokens).
+    // b) Add their PIDs to a "SystemWhitelist" global list.
+    // c) Check that list here.
 
-    if (!NT_SUCCESS(status)) {
-        return FALSE;
-    }
-
-    // 3. Query the token's Integrity Level (first call to get required buffer size)
-    // ZwQueryInformationToken must be available via included headers
-    status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, NULL, 0, &tokenInfoLength);
-
-    if (status == STATUS_BUFFER_TOO_SMALL) {
-        pLabel = (PTOKEN_MANDATORY_LABEL)ExAllocatePoolWithTag(NonPagedPool, tokenInfoLength, 'liTM');
-
-        if (pLabel) {
-            // 4. Query the token's Integrity Level (second call to get data)
-            status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, pLabel, tokenInfoLength, &tokenInfoLength);
-
-            if (NT_SUCCESS(status)) {
-                // 5. Check if the Integrity Level is SECURITY_MANDATORY_SYSTEM_RID
-                ULONG subAuthorityCount = *RtlSubAuthorityCountSid(pLabel->Label.Sid);
-                ULONG integrityLevel = *RtlSubAuthoritySid(pLabel->Label.Sid, subAuthorityCount - 1);
-
-                if (integrityLevel == SECURITY_MANDATORY_SYSTEM_RID) {
-                    isSystem = TRUE;
-                }
-            }
-            // Free the dynamically allocated buffer
-            ExFreePoolWithTag(pLabel, 'liTM');
-        }
-    }
-
-    // 6. Close the token handle
-    ZwClose(hToken);
-    return isSystem;
+    return FALSE;
 }
 
 // Case-insensitive check to see if 'Source' string ENDS WITH 'Pattern'.
