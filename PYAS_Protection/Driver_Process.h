@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ntddk.h>
+#include <ntstrsafe.h>
 
 //
 // --- Process & Thread Access Rights Definitions ---
@@ -8,32 +8,34 @@
 
 // From winnt.h, for Process Access Rights
 #ifndef PROCESS_TERMINATE
-#define PROCESS_TERMINATE                 (0x0001)  
-#define PROCESS_CREATE_THREAD             (0x0002)  
-#define PROCESS_SET_SESSIONID             (0x0004)  
-#define PROCESS_VM_OPERATION              (0x0008)  
-#define PROCESS_VM_READ                   (0x0010)  
-#define PROCESS_VM_WRITE                  (0x0020)  
-#define PROCESS_DUP_HANDLE                (0x0040)  
-#define PROCESS_CREATE_PROCESS            (0x0080)  
-#define PROCESS_SET_QUOTA                 (0x0100)  
-#define PROCESS_SET_INFORMATION           (0x0200)  
-#define PROCESS_QUERY_INFORMATION         (0x0400)  
-#define PROCESS_SUSPEND_RESUME            (0x0800)
+#define PROCESS_TERMINATE             (0x0001)
+#define PROCESS_CREATE_THREAD         (0x0002)
+#define PROCESS_SET_SESSIONID         (0x0004)
+#define PROCESS_VM_OPERATION          (0x0008)
+#define PROCESS_VM_READ               (0x0010)
+#define PROCESS_VM_WRITE              (0x0020)
+#define PROCESS_DUP_HANDLE            (0x0040)
+#define PROCESS_CREATE_PROCESS        (0x0080)
+#define PROCESS_SET_QUOTA             (0x0100)
+#define PROCESS_SET_INFORMATION       (0x0200)
+#define PROCESS_QUERY_INFORMATION     (0x0400)
+#define PROCESS_SUSPEND_RESUME        (0x0800)
 #define PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
 #define PROCESS_SET_LIMITED_INFORMATION   (0x2000)
 #endif
 
-#define THREAD_TERMINATE           0x0001
-#define THREAD_SUSPEND_RESUME      0x0002
-#define THREAD_GET_CONTEXT         0x0008
-#define THREAD_SET_CONTEXT         0x0010
+#ifndef THREAD_TERMINATE
+#define THREAD_TERMINATE             0x0001
+#define THREAD_SUSPEND_RESUME        0x0002
+#define THREAD_GET_CONTEXT           0x0008
+#define THREAD_SET_CONTEXT           0x0010
 #define THREAD_QUERY_LIMITED_INFORMATION 0x0800
-#define THREAD_SET_INFORMATION     0x0020
-#define THREAD_QUERY_INFORMATION   0x0040
-#define THREAD_SET_THREAD_TOKEN    0x0080
-#define THREAD_IMPERSONATE         0x0100
-#define THREAD_DIRECT_IMPERSONATION 0x0200
+#define THREAD_SET_INFORMATION       0x0020
+#define THREAD_QUERY_INFORMATION     0x0040
+#define THREAD_SET_THREAD_TOKEN      0x0080
+#define THREAD_IMPERSONATE           0x0100
+#define THREAD_DIRECT_IMPERSONATION  0x0200
+#endif
 
 //
 // --- Constants ---
@@ -78,6 +80,33 @@ typedef struct _PROCESS_ALERT_WORK_ITEM {
 } PROCESS_ALERT_WORK_ITEM, * PPROCESS_ALERT_WORK_ITEM;
 
 //
+// --- NT API Definitions (Needed for IsSystemProcess compilation) ---
+//
+// Reintroducing these declarations to resolve the 'ZwOpenProcessToken' undefined error.
+// They are often necessary in driver headers even if the main header file is included.
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwOpenProcessToken(
+    _In_ HANDLE ProcessHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PHANDLE TokenHandle
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQueryInformationToken(
+    _In_ HANDLE TokenHandle,
+    _In_ TOKEN_INFORMATION_CLASS TokenInformationClass,
+    _Out_writes_bytes_to_opt_(TokenInformationLength, *ReturnLength) PVOID TokenInformation,
+    _In_ ULONG TokenInformationLength,
+    _Out_ PULONG ReturnLength
+);
+
+
+//
 // --- Function Prototypes ---
 //
 
@@ -110,24 +139,24 @@ VOID ProcessAlertWorker(
 
 // Helper functions
 BOOLEAN IsProtectedProcessByPath(
-    PEPROCESS Process
+    _In_ PEPROCESS Process
 );
 
 BOOLEAN IsProtectedProcessByPid(
-    HANDLE ProcessId
+    _In_ HANDLE ProcessId
 );
 
 BOOLEAN IsSystemProcess(
-    PEPROCESS Process
+    _In_ PEPROCESS Process
 );
 
 BOOLEAN UnicodeStringEndsWithInsensitive(
-    PUNICODE_STRING Source,
-    PCWSTR Pattern
+    _In_ PUNICODE_STRING Source,
+    _In_ PCWSTR Pattern
 );
 
 NTSTATUS QueueProcessAlertToUserMode(
-    PEPROCESS TargetProcess,
-    PEPROCESS AttackerProcess,
-    PCWSTR AttackType
+    _In_ PEPROCESS TargetProcess,
+    _In_ PEPROCESS AttackerProcess,
+    _In_ PCWSTR AttackType
 );

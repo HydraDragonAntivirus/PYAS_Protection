@@ -1,6 +1,4 @@
-// Process.c - Process & Thread protection with PID tracking and system process whitelist
-#include <ntifs.h>
-#include <ntstrsafe.h>
+// Process.c - Process & Thread protection with PID tracking and system process
 #include "Driver.h"
 #include "Driver_Process.h"
 
@@ -11,6 +9,10 @@
 LIST_ENTRY g_ProtectedPidsList;
 KSPIN_LOCK g_ProtectedPidsLock;
 PVOID g_ObRegistrationHandle = NULL;
+
+// Globals for registration structures (static to manage lifespan)
+static POB_CALLBACK_REGISTRATION g_ObReg = NULL;
+static POB_OPERATION_REGISTRATION g_OpReg = NULL;
 
 //
 // --- Driver Entry and Unload ---
@@ -35,11 +37,22 @@ NTSTATUS ProcessDriverUnload() {
     }
 
     // Unregister the process creation notification routine
-    // The first parameter should be the same function pointer used for registration.
+    // The second parameter TRUE indicates removal of the routine.
     PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
+
+    // Free the allocated registration memory (prevent pool leak)
+    if (g_OpReg) {
+        ExFreePoolWithTag(g_OpReg, 'gOpR');
+        g_OpReg = NULL;
+    }
+    if (g_ObReg) {
+        ExFreePoolWithTag(g_ObReg, 'gObR');
+        g_ObReg = NULL;
+    }
 
     // Clean up the protected PID list
     KLOCK_QUEUE_HANDLE lockHandle;
+    // DriverUnload is at PASSIVE_LEVEL, so this is safe.
     KeAcquireInStackQueuedSpinLock(&g_ProtectedPidsLock, &lockHandle);
 
     while (!IsListEmpty(&g_ProtectedPidsList)) {
@@ -57,9 +70,6 @@ NTSTATUS ProcessDriverUnload() {
 //
 // --- Initialization ---
 //
-// globals
-static POB_CALLBACK_REGISTRATION g_ObReg = NULL;
-static POB_OPERATION_REGISTRATION g_OpReg = NULL;
 
 NTSTATUS ProtectProcess(void)
 {
@@ -76,6 +86,7 @@ NTSTATUS ProtectProcess(void)
     KeInitializeSpinLock(&g_ProtectedPidsLock);
 
     // Register process notify
+    // The second parameter FALSE indicates registration.
     status = PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, FALSE);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[Process-Protection] PsSetCreateProcessNotifyRoutineEx failed: 0x%X\n", status);
@@ -86,6 +97,7 @@ NTSTATUS ProtectProcess(void)
     g_OpReg = (POB_OPERATION_REGISTRATION)ExAllocatePoolWithTag(
         NonPagedPoolNx, sizeof(OB_OPERATION_REGISTRATION) * 2, 'gOpR');
     if (!g_OpReg) {
+        // Cleanup on failure
         PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -94,6 +106,7 @@ NTSTATUS ProtectProcess(void)
     g_ObReg = (POB_CALLBACK_REGISTRATION)ExAllocatePoolWithTag(
         NonPagedPoolNx, sizeof(OB_CALLBACK_REGISTRATION), 'gObR');
     if (!g_ObReg) {
+        // Cleanup on failure
         ExFreePoolWithTag(g_OpReg, 'gOpR');
         g_OpReg = NULL;
         PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyRoutine, TRUE);
@@ -101,12 +114,13 @@ NTSTATUS ProtectProcess(void)
     }
     RtlZeroMemory(g_ObReg, sizeof(OB_CALLBACK_REGISTRATION));
 
-    // Fill g_OpReg
+    // Fill g_OpReg: Operation 0 - Process Handle Operations
     g_OpReg[0].ObjectType = PsProcessType;
     g_OpReg[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
     g_OpReg[0].PreOperation = preCall;
     g_OpReg[0].PostOperation = NULL;
 
+    // Fill g_OpReg: Operation 1 - Thread Handle Operations
     g_OpReg[1].ObjectType = PsThreadType;
     g_OpReg[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
     g_OpReg[1].PreOperation = threadPreCall;
@@ -123,6 +137,7 @@ NTSTATUS ProtectProcess(void)
     status = ObRegisterCallbacks(g_ObReg, &g_ObRegistrationHandle);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[Process-Protection] ObRegisterCallbacks failed: 0x%X\n", status);
+        // Cleanup on failure
         ExFreePoolWithTag(g_OpReg, 'gOpR');
         ExFreePoolWithTag(g_ObReg, 'gObR');
         g_OpReg = NULL;
@@ -171,14 +186,17 @@ VOID CreateProcessNotifyRoutine(
         PLIST_ENTRY pCurrent = g_ProtectedPidsList.Flink;
         while (pCurrent != &g_ProtectedPidsList) {
             PPROTECTED_PID_ENTRY pEntry = CONTAINING_RECORD(pCurrent, PROTECTED_PID_ENTRY, ListEntry);
+            PLIST_ENTRY pNext = pCurrent->Flink; // Save next pointer before removal
+
             if (pEntry->ProcessId == ProcessId) {
                 RemoveEntryList(&pEntry->ListEntry);
                 ExFreePoolWithTag(pEntry, PID_LIST_TAG);
                 DbgPrint("[Process-Protection] Protected process terminated: PID %llu\r\n",
                     (unsigned long long)(ULONG_PTR)ProcessId);
+                // Exit loop since we found and removed the entry
                 break;
             }
-            pCurrent = pCurrent->Flink;
+            pCurrent = pNext;
         }
 
         KeReleaseInStackQueuedSpinLock(&lockHandle);
@@ -359,43 +377,59 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
     return result;
 }
 
+// Checks if a process is a System-level process by its Mandatory Integrity Level (System IL).
 BOOLEAN IsSystemProcess(PEPROCESS Process) {
-    HANDLE hProcess;
+    // Explicit initialization of all locals to prevent 'lnt-uninitialized-local' warning.
+    HANDLE hProcess = NULL;
+    HANDLE hToken = NULL;
     NTSTATUS status;
+    BOOLEAN isSystem = FALSE;
+    PTOKEN_MANDATORY_LABEL pLabel = NULL;
+    ULONG tokenInfoLength = 0;
+
+    // 1. Get a handle to the process
     status = ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, 0, *PsProcessType, KernelMode, &hProcess);
     if (!NT_SUCCESS(status)) {
         return FALSE;
     }
 
-    HANDLE hToken;
+    // 2. Open the process token (ZwOpenProcessToken must be available via included headers)
     status = ZwOpenProcessToken(hProcess, TOKEN_QUERY, &hToken);
+    // hProcess must be closed regardless of success
     ZwClose(hProcess);
+
     if (!NT_SUCCESS(status)) {
         return FALSE;
     }
 
-    ULONG tokenInfoLength;
-    PTOKEN_MANDATORY_LABEL pLabel = NULL;
+    // 3. Query the token's Integrity Level (first call to get required buffer size)
+    // ZwQueryInformationToken must be available via included headers
     status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, NULL, 0, &tokenInfoLength);
+
     if (status == STATUS_BUFFER_TOO_SMALL) {
         pLabel = (PTOKEN_MANDATORY_LABEL)ExAllocatePoolWithTag(NonPagedPool, tokenInfoLength, 'liTM');
+
         if (pLabel) {
+            // 4. Query the token's Integrity Level (second call to get data)
             status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, pLabel, tokenInfoLength, &tokenInfoLength);
+
             if (NT_SUCCESS(status)) {
+                // 5. Check if the Integrity Level is SECURITY_MANDATORY_SYSTEM_RID
                 ULONG subAuthorityCount = *RtlSubAuthorityCountSid(pLabel->Label.Sid);
                 ULONG integrityLevel = *RtlSubAuthoritySid(pLabel->Label.Sid, subAuthorityCount - 1);
+
                 if (integrityLevel == SECURITY_MANDATORY_SYSTEM_RID) {
-                    ExFreePoolWithTag(pLabel, 'liTM');
-                    ZwClose(hToken);
-                    return TRUE;
+                    isSystem = TRUE;
                 }
             }
+            // Free the dynamically allocated buffer
             ExFreePoolWithTag(pLabel, 'liTM');
         }
     }
 
+    // 6. Close the token handle
     ZwClose(hToken);
-    return FALSE;
+    return isSystem;
 }
 
 // Case-insensitive check to see if 'Source' string ENDS WITH 'Pattern'.
@@ -413,6 +447,7 @@ BOOLEAN UnicodeStringEndsWithInsensitive(PUNICODE_STRING Source, PCWSTR Pattern)
     sourceSuffix.MaximumLength = patternString.Length;
     sourceSuffix.Buffer = (PWCH)((PCHAR)Source->Buffer + Source->Length - patternString.Length);
 
+    // Compare case-insensitively
     return (RtlCompareUnicodeString(&sourceSuffix, &patternString, TRUE) == 0);
 }
 
@@ -489,6 +524,7 @@ NTSTATUS QueueProcessAlertToUserMode(
     // Copy PIDs and attack type
     workItem->TargetPid = PsGetProcessId(TargetProcess);
     workItem->AttackerPid = PsGetProcessId(AttackerProcess);
+    // RtlStringCbCopyW ensures null termination within bounds
     RtlStringCbCopyW(workItem->AttackType, sizeof(workItem->AttackType), AttackType);
 
     // Queue work item
@@ -508,6 +544,7 @@ VOID ProcessAlertWorker(PVOID Context)
     if (!workItem)
         return;
 
+    // Use safe pointer checks
     PCWSTR targetName = workItem->TargetPath.Buffer ? workItem->TargetPath.Buffer : L"Unknown";
     PCWSTR attackerName = workItem->AttackerPath.Buffer ? workItem->AttackerPath.Buffer : L"Unknown";
 
