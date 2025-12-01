@@ -186,14 +186,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Driver.h" />
-    <ClInclude Include="Driver_Process.h" />
     <ClInclude Include="Driver_Regedit.h" />
     <ClInclude Include="Driver_File.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Driver.c" />
     <ClCompile Include="File.c" />
-    <ClCompile Include="Process.c" />
     <ClCompile Include="Regedit.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

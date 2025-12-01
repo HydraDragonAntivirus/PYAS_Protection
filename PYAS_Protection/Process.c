@@ -218,9 +218,7 @@ OB_PREOP_CALLBACK_STATUS preCall(
     PEPROCESS currentProc = PsGetCurrentProcess();
     PEPROCESS targetProc = (PEPROCESS)pOperationInformation->Object;
 
-    // 2. POINTER EQUALITY CHECK (CRITICAL FIX FOR STARTUP CRASH)
-    // Always allow a process to access itself.
-    // Check pointers first to avoid overhead and IsSystemProcess recursion risks.
+    // 2. POINTER EQUALITY CHECK
     if (currentProc == targetProc)
         return OB_PREOP_SUCCESS;
 
@@ -228,13 +226,12 @@ OB_PREOP_CALLBACK_STATUS preCall(
     HANDLE targetPid = PsGetProcessId(targetProc);
 
     // 3. PID EQUALITY CHECK
-    // Redundant but safe fallback for self-access.
     if (callerPid == targetPid)
         return OB_PREOP_SUCCESS;
 
-    // 4. SYSTEM PROCESS CHECK (Must be done WITHOUT opening handles!)
-    // Allow Windows system processes full access to everything
-    // MOVED: Checked AFTER self-access to prevent recursion during init.
+    // 4. SYSTEM PROCESS CHECK (Improved for CSRSS compatibility)
+    // Must be done WITHOUT opening handles to avoid recursion.
+    // Checks both PID 0/4 and critical system process names.
     if (IsSystemProcess(currentProc)) {
         return OB_PREOP_SUCCESS;
     }
@@ -293,8 +290,7 @@ OB_PREOP_CALLBACK_STATUS threadPreCall(
 
     HANDLE targetPid = PsGetProcessId(targetProc);
 
-    // 2. SELF-ACCESS CHECK (CRITICAL FIX)
-    // Must be done BEFORE IsSystemProcess to prevent recursion.
+    // 2. SELF-ACCESS CHECK
     if (callerPid == targetPid)
         return OB_PREOP_SUCCESS;
 
@@ -389,9 +385,8 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
     return result;
 }
 
-// RECURSION FIX: Checks if a process is System.
-// CRITICAL CHANGE: Removed ObOpenObjectByPointer to prevent infinite recursion loop
-// inside ObRegisterCallbacks. Using Handles inside a pre-operation callback is strictly forbidden.
+// RECURSION SAFE FIX: Checks if a process is System using PID and Safe Name Check.
+// Uses PsGetProcessImageFileName which is recursion-safe (doesn't open handles).
 BOOLEAN IsSystemProcess(PEPROCESS Process) {
     HANDLE pid = PsGetProcessId(Process);
 
@@ -401,15 +396,21 @@ BOOLEAN IsSystemProcess(PEPROCESS Process) {
         return TRUE;
     }
 
-    // 2. Note on checking Token Integrity Level (Recursive Danger):
-    // We cannot safely call ZwOpenProcessToken or ObOpenObjectByPointer here because
-    // it triggers the handle creation callback (preCall) again, leading to a stack overflow.
-    //
-    // If you need to whitelist other system services (like lsass.exe),
-    // do NOT do it here. Instead:
-    // a) Identify them in CreateProcessNotifyRoutine (where it is safe to open tokens).
-    // b) Add their PIDs to a "SystemWhitelist" global list.
-    // c) Check that list here.
+    // 2. Check for Critical Subsystem Processes (csrss, lsass, etc.)
+    // We CANNOT use OpenProcess/OpenToken here (recursion risk).
+    // We use PsGetProcessImageFileName which simply reads the EPROCESS structure.
+    UCHAR* processName = PsGetProcessImageFileName(Process);
+
+    if (processName) {
+        // Use case-insensitive ASCII comparison (_stricmp is available in kernel)
+        if (_stricmp((char*)processName, "csrss.exe") == 0 ||
+            _stricmp((char*)processName, "lsass.exe") == 0 ||
+            _stricmp((char*)processName, "services.exe") == 0 ||
+            _stricmp((char*)processName, "wininit.exe") == 0 ||
+            _stricmp((char*)processName, "smss.exe") == 0) {
+            return TRUE;
+        }
+    }
 
     return FALSE;
 }

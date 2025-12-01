@@ -24,9 +24,6 @@
     </Inf>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Driver_Process.h">
-      <Filter>Resource Files\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Driver_File.h">
       <Filter>Resource Files\Header Files</Filter>
     </ClInclude>
@@ -38,9 +35,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Process.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="File.c">
       <Filter>Source Files</Filter>
     </ClCompile>

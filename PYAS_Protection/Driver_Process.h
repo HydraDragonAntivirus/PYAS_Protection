@@ -80,10 +80,8 @@ typedef struct _PROCESS_ALERT_WORK_ITEM {
 } PROCESS_ALERT_WORK_ITEM, * PPROCESS_ALERT_WORK_ITEM;
 
 //
-// --- NT API Definitions (Needed for IsSystemProcess compilation) ---
+// --- NT API Definitions ---
 //
-// Reintroducing these declarations to resolve the 'ZwOpenProcessToken' undefined error.
-// They are often necessary in driver headers even if the main header file is included.
 
 NTSYSAPI
 NTSTATUS
@@ -103,6 +101,13 @@ ZwQueryInformationToken(
     _Out_writes_bytes_to_opt_(TokenInformationLength, *ReturnLength) PVOID TokenInformation,
     _In_ ULONG TokenInformationLength,
     _Out_ PULONG ReturnLength
+);
+
+// Define PsGetProcessImageFileName as it is not always in standard WDK headers
+NTKERNELAPI
+UCHAR*
+PsGetProcessImageFileName(
+    _In_ PEPROCESS Process
 );
 
 
