@@ -360,35 +360,42 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
 }
 
 BOOLEAN IsSystemProcess(PEPROCESS Process) {
-    PUNICODE_STRING pImageName = NULL;
+    HANDLE hProcess;
     NTSTATUS status;
-    BOOLEAN result = FALSE;
-
-    status = SeLocateProcessImageName(Process, &pImageName);
-    if (!NT_SUCCESS(status) || !pImageName || !pImageName->Buffer) {
-        if (pImageName) ExFreePool(pImageName);
+    status = ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, 0, *PsProcessType, KernelMode, &hProcess);
+    if (!NT_SUCCESS(status)) {
         return FALSE;
     }
 
-    // Critical Windows system processes that need full access
-    static const PCWSTR systemProcesses[] = {
-        L"\\Windows\\System32\\csrss.exe",
-        L"\\Windows\\System32\\services.exe",
-        L"\\Windows\\System32\\svchost.exe",
-        L"\\Windows\\System32\\lsass.exe",
-        L"\\Windows\\System32\\smss.exe",
-        L"\\Windows\\System32\\wininit.exe"
-    };
+    HANDLE hToken;
+    status = ZwOpenProcessToken(hProcess, TOKEN_QUERY, &hToken);
+    ZwClose(hProcess);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
 
-    for (ULONG i = 0; i < ARRAYSIZE(systemProcesses); ++i) {
-        if (UnicodeStringEndsWithInsensitive(pImageName, systemProcesses[i])) {
-            result = TRUE;
-            break;
+    ULONG tokenInfoLength;
+    PTOKEN_MANDATORY_LABEL pLabel = NULL;
+    status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, NULL, 0, &tokenInfoLength);
+    if (status == STATUS_BUFFER_TOO_SMALL) {
+        pLabel = (PTOKEN_MANDATORY_LABEL)ExAllocatePoolWithTag(NonPagedPool, tokenInfoLength, 'liTM');
+        if (pLabel) {
+            status = ZwQueryInformationToken(hToken, TokenIntegrityLevel, pLabel, tokenInfoLength, &tokenInfoLength);
+            if (NT_SUCCESS(status)) {
+                ULONG subAuthorityCount = *RtlSubAuthorityCountSid(pLabel->Label.Sid);
+                ULONG integrityLevel = *RtlSubAuthoritySid(pLabel->Label.Sid, subAuthorityCount - 1);
+                if (integrityLevel == SECURITY_MANDATORY_SYSTEM_RID) {
+                    ExFreePoolWithTag(pLabel, 'liTM');
+                    ZwClose(hToken);
+                    return TRUE;
+                }
+            }
+            ExFreePoolWithTag(pLabel, 'liTM');
         }
     }
 
-    ExFreePool(pImageName);
-    return result;
+    ZwClose(hToken);
+    return FALSE;
 }
 
 // Case-insensitive check to see if 'Source' string ENDS WITH 'Pattern'.
