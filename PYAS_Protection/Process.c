@@ -366,7 +366,8 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
 
     // Define the paths of the executables to be protected
     static const PCWSTR patterns[] = {
-        L"\\Owlyshield Service\\owlyshield_ransom.exe",
+        L"\\Service\\HydraDragonAntivirusTaskScheduler.exe",
+        L"Service\\owlyshield_ransom.exe",
         L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
         L"\\Sanctum\\sanctum_ppl_runner.exe",
         L"\\sanctum\\app.exe",

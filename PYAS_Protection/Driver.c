@@ -176,6 +176,7 @@ NTSTATUS DriverEntry(
 #endif
 
 	// Initialize core modules
+	ProcessDriverEntry();
 	FileDriverEntry();
 	RegeditDriverEntry();
 
@@ -188,6 +189,7 @@ NTSTATUS DriverEntry(
 //	UNREFERENCED_PARAMETER(pDriverObj);
 //
 //	// Cleanup other modules
+//  ProcessDriverUnload();
 //	FileUnloadDriver();
 //	RegeditUnloadDriver();
 //
