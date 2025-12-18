@@ -1,6 +1,7 @@
 // File.c - Self-Defense Protection with User-Mode Alerting (uses CXX_FileProtectX64.h
 #include "Driver.h"
 #include "Driver_File.h"   // your header with OBJECT_TYPE_TEMP and related typedefs
+#include "Driver_Common.h" // Include common helpers
 
 // globals
 PVOID g_CallBackHandle = NULL;
@@ -70,8 +71,8 @@ VOID EnableObType(POBJECT_TYPE ObjectType)
 
         // Basic validation: ensure the Name.Buffer pointer is reasonably aligned/non-NULL or not completely bogus.
         // This isn't perfect but can reduce chance of arbitrarily writing to bad memory.
+        // This check is conservative: if both are NULL we still proceed but log a warning.
         if (pTemp->Name.Buffer == NULL && pTemp->DefaultObject == NULL) {
-            // This check is conservative: if both are NULL we still proceed but log a warning.
             DbgPrint("[Self-Defense] EnableObType: object type fields appear NULL (continuing with caution)\n");
         }
 
@@ -183,28 +184,16 @@ OB_PREOP_CALLBACK_STATUS PreCallBack(
     UNICODE_STRING fileName = nameInfo->Name;
     BOOLEAN isProtected = FALSE;
 
-    static const PCWSTR protectedPatterns[] = {
-        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
-        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.dll", // WARNING: Some antivirus programs (like Malwarebytes or Ikarus) may be unable to remove HydraDragon Antivirus and might mistakenly flag your system as infected because of it.
-        L"\\Service\\HydraDragonAntivirusTaskScheduler.exe",
-        L"\\Service\\HydraDragonAntivirusTaskScheduler.dll",
-        L"Service\\owlyshield_ransom.exe",
-        L"Service\\tensorflowlite_c.dll",
-        L"\\drivers\\OwlyshieldRansomFilter.sys",
-        L"\\drivers\\MBRFilter.sys",
-        L"\\sanctum\\app.exe",
-        L"\\sanctum\\server.exe",
-        L"\\sanctum\\um_engine.exe",
-        L"\\sanctum\\elam_installer.exe",
-        L"\\AppData\\Roaming\\Sanctum\\sanctum.dll",
-        L"\\AppData\\Roaming\\Sanctum\\sanctum.sys",
-        L"\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe",
-        L"\\exluced\\excluded_rules.txt"
-        L"\\Windows\\explorer.exe" // Very small chance explorer.exe itself is compromised; terminating it may be harmless in some cases
+    // Folder-based protection patterns
+    // Using ContainsSubstringInsensitive to match substring anywhere in the DOS Path
+    static const PCWSTR protectedFolders[] = {
+        L"\\Program Files\\HydraDragonAntivirus", 
+        L"\\Desktop\\Sanctum",
+        L"\\AppData\\Roaming\\Sanctum"
     };
-
-    for (ULONG i = 0; i < ARRAYSIZE(protectedPatterns); ++i) {
-        if (wcsstr(fileName.Buffer, protectedPatterns[i]) != NULL) {
+    
+    for (ULONG i = 0; i < ARRAYSIZE(protectedFolders); ++i) {
+        if (ContainsSubstringInsensitive(fileName.Buffer, protectedFolders[i])) {
             isProtected = TRUE;
             break;
         }
@@ -299,13 +288,23 @@ VOID SendAlertWorker(PVOID Context)
     if (!workItem) return;
 
     WCHAR messageBuffer[2048];
+    WCHAR escapedProtected[512];
+    WCHAR escapedAttacker[512];
 
     PCWSTR protectedName = (workItem->ProtectedFile.Buffer) ? workItem->ProtectedFile.Buffer : L"Unknown";
     PCWSTR attackerPath = (workItem->AttackingProcessPath.Buffer) ? workItem->AttackingProcessPath.Buffer : L"Unknown";
 
+    // Escape for JSON
+    if (!EscapeJsonString(escapedProtected, sizeof(escapedProtected), protectedName)) {
+        RtlStringCbCopyW(escapedProtected, sizeof(escapedProtected), L"ErrorEscapingPath");
+    }
+    if (!EscapeJsonString(escapedAttacker, sizeof(escapedAttacker), attackerPath)) {
+        RtlStringCbCopyW(escapedAttacker, sizeof(escapedAttacker), L"ErrorEscapingPath");
+    }
+
     NTSTATUS status = RtlStringCchPrintfW(messageBuffer, RTL_NUMBER_OF(messageBuffer),
         L"{\"protected_file\":\"%ws\",\"attacker_path\":\"%ws\",\"attacker_pid\":%p,\"attack_type\":\"%ws\"}",
-        protectedName, attackerPath, workItem->AttackingPid, workItem->AttackType);
+        escapedProtected, escapedAttacker, workItem->AttackingPid, workItem->AttackType);
 
     if (NT_SUCCESS(status))
     {

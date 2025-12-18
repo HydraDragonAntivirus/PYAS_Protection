@@ -1,6 +1,7 @@
 // Process.c - Process & Thread protection with PID tracking and system process
 #include "Driver.h"
 #include "Driver_Process.h"
+#include "Driver_Common.h" // Include common helpers
 
 //
 // --- Globals ---
@@ -364,19 +365,20 @@ BOOLEAN IsProtectedProcessByPath(PEPROCESS Process) {
         return FALSE;
     }
 
-    // Define the paths of the executables to be protected
-    static const PCWSTR patterns[] = {
-        L"\\Service\\HydraDragonAntivirusTaskScheduler.exe",
-        L"Service\\owlyshield_ransom.exe",
-        L"\\HydraDragonAntivirus\\HydraDragonAntivirusLauncher.exe",
-        L"\\Sanctum\\sanctum_ppl_runner.exe",
-        L"\\sanctum\\app.exe",
-        L"\\sanctum\\server.exe",
-        L"\\sanctum\\um_engine.exe"
+    // Define the FOLDERS to be protected.
+    // Matches ANY process running from these folders or subfolders.
+    // Uses substring matching to avoid drive letter issues and handle full paths.
+    // NOTE: SeLocateProcessImageName returns Native paths e.g. \Device\HarddiskVolume3\Program Files...
+    // But ContainsSubstringInsensitive is robust enough to find "\Program Files\..." inside it.
+    static const PCWSTR protectedFolders[] = {
+        L"\\Program Files\\HydraDragonAntivirus\\",
+        L"\\Desktop\\Sanctum\\", 
+        L"\\AppData\\Roaming\\Sanctum\\"
     };
 
-    for (ULONG i = 0; i < ARRAYSIZE(patterns); ++i) {
-        if (UnicodeStringEndsWithInsensitive(pImageName, patterns[i])) {
+    // Check Folders
+    for (ULONG i = 0; i < ARRAYSIZE(protectedFolders); ++i) {
+        if (ContainsSubstringInsensitive(pImageName->Buffer, protectedFolders[i])) {
             result = TRUE;
             break;
         }
@@ -524,6 +526,8 @@ VOID ProcessAlertWorker(PVOID Context)
     PPROCESS_ALERT_WORK_ITEM workItem = (PPROCESS_ALERT_WORK_ITEM)Context;
     NTSTATUS status;
     WCHAR messageBuffer[2048];
+    WCHAR escapedTarget[512];
+    WCHAR escapedAttacker[512];
 
     if (!workItem)
         return;
@@ -532,14 +536,23 @@ VOID ProcessAlertWorker(PVOID Context)
     PCWSTR targetName = workItem->TargetPath.Buffer ? workItem->TargetPath.Buffer : L"Unknown";
     PCWSTR attackerName = workItem->AttackerPath.Buffer ? workItem->AttackerPath.Buffer : L"Unknown";
 
+    // Escape the paths for valid JSON
+    if (!EscapeJsonString(escapedTarget, sizeof(escapedTarget), targetName)) {
+        RtlStringCbCopyW(escapedTarget, sizeof(escapedTarget), L"ErrorEscapingPath");
+    }
+    if (!EscapeJsonString(escapedAttacker, sizeof(escapedAttacker), attackerName)) {
+        RtlStringCbCopyW(escapedAttacker, sizeof(escapedAttacker), L"ErrorEscapingPath");
+    }
+
     // Build JSON message
     RtlZeroMemory(messageBuffer, sizeof(messageBuffer));
+    // NOTE: Using the escaped strings now
     status = RtlStringCbPrintfW(
         messageBuffer,
         sizeof(messageBuffer),
         L"{\"protected_file\":\"%s\",\"attacker_path\":\"%s\",\"attacker_pid\":%llu,\"attack_type\":\"%s\",\"target_pid\":%llu}",
-        targetName,
-        attackerName,
+        escapedTarget,
+        escapedAttacker,
         (unsigned long long)(ULONG_PTR)workItem->AttackerPid,
         workItem->AttackType,
         (unsigned long long)(ULONG_PTR)workItem->TargetPid
