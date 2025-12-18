@@ -186,6 +186,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Driver.h" />
+    <ClInclude Include="Driver_Common.h" />
     <ClInclude Include="Driver_Regedit.h" />
     <ClInclude Include="Driver_File.h" />
   </ItemGroup>
